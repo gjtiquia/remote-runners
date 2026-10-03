@@ -97,7 +97,9 @@ type fixture struct {
 
 func startCoordinator(t *testing.T) fixture {
 	t.Helper()
-	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: 100 * time.Millisecond})
+	// These exercise CLI behaviour, not heartbeat cutoff. Use production timing
+	// so instrumented large-output transfers don't cause artificial runner loss.
+	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
