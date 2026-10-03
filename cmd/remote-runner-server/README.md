@@ -16,8 +16,12 @@ Options only; positional arguments are rejected. Defaults:
 | `-heartbeat-interval` | `10s` | Coordinator heartbeat request interval; must be positive. |
 | `-heartbeat-misses` | `3` | Consecutive unanswered rounds before deregistration; must be at least one. |
 
-The actual bound address and operational errors are written to stderr. The
-coordinator handler accepts outbound worker WebSockets at `/runner` from network
+The actual bound address and operational errors are written to stderr. Startup,
+graceful shutdown and coordinator lifecycle logs carry component prefixes and
+host-local date/time timestamps. Job logs include IDs, quoted branches and safe
+project basenames, never full remote URLs, credentials or command arguments.
+Healthy heartbeats, management polling and output chunks do not produce logs.
+The coordinator handler accepts outbound worker WebSockets at `/runner` from network
 peers, but rejects all submission/management routes unless the **socket peer** is
 loopback. Forwarded headers do not confer access. Workers explicitly trust this
 unauthenticated coordinator; expose it only on an operator-managed trusted

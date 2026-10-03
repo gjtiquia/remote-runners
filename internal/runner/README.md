@@ -110,6 +110,24 @@ Results report command exit codes, `128 + signal` where applicable, cancellation
 130, timeout 124, and output/infrastructure failures 125 when a code is available.
 Hook/preparation failures default to 1. Helpers print a visible completion footer.
 
+## Progress visibility
+
+Runner stderr logs startup roots/tmux checks, connection/registration, received
+jobs, capacity refusals, actual new/reused window and pane IDs, helper launch,
+cancellation, output-transfer start/finish (or failure), completion, and
+disconnection with the reminder that local jobs continue. Job-pane stderr logs
+Git/worktree preparation, the actual ready root/commit, creation/before-job hooks,
+the executable basename, and completion including cancellation/timeout outcomes.
+Both use component-tagged local wall-clock `YYYY/MM/DD HH:mm:ss` timestamps and
+quoted identifiers/labels. New diagnostics never print environments, complete
+argv, credentials, or raw remote URLs, and never log routine heartbeat/polling
+success. Existing Git/hook/command output is unchanged and may contain whatever
+those programs print.
+
+Helper progress bypasses the stdout/disk payload tee: it remains visible in the
+job terminal but is not transferred as job output. The existing completion footer
+and command stdout/stderr payload capture are unchanged.
+
 ## Wire/output/lifetime
 
 Outbound WebSocket `/runner` registration sends `register` with `RunnerInfo` and

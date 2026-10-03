@@ -51,6 +51,7 @@ func (s *Server) serveRunner(w http.ResponseWriter, req *http.Request) {
 	r := &registration{info: *m.Runner, id: "registration-" + rand.Text(), conn: conn, active: make(map[string]bool), wake: make(chan struct{}, 1), done: make(chan struct{})}
 	r.info.Misses = 0 // Timing policy belongs exclusively to the coordinator.
 	s.runners[r.info.ID] = r
+	s.opts.Logger.Printf("runner registered runner_id=%q priority=%d slots=%d peer=%q", r.info.ID, r.info.Priority, r.info.Slots, req.RemoteAddr)
 	s.enqueueLocked(r, protocol.Message{Type: "registered", RegistrationID: r.id})
 	s.wg.Add(1)
 	go s.writeRunner(r)
@@ -68,6 +69,9 @@ func (s *Server) serveRunner(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		if msg.Type == "heartbeat_response" && msg.Sequence > r.lastResponse && msg.Sequence <= r.sequence && msg.Runner != nil && validRunner(*msg.Runner) && msg.Runner.ID == r.info.ID {
+			if r.info.Misses > 0 {
+				s.opts.Logger.Printf("runner heartbeat recovered runner_id=%q misses=%d", r.info.ID, r.info.Misses)
+			}
 			r.lastResponse = msg.Sequence
 			s.reportCapacityLocked(r, *msg.Runner, "")
 			r.info.Misses = 0
@@ -103,6 +107,7 @@ func (s *Server) serveRunner(w http.ResponseWriter, req *http.Request) {
 				// Only an unstarted assignment may be returned, with a valid
 				// unavailable snapshot. Never immediately redispatch to its sender.
 				if !j.outputReceived && msg.Runner != nil && validRunner(*msg.Runner) && msg.Runner.ID == r.info.ID && !hasReportedCapacity(*msg.Runner) {
+					s.opts.Logger.Printf("job declined job_id=%q runner_id=%q branch=%q; unstarted assignment released", j.job.ID, r.info.ID, j.job.Source.Branch)
 					s.reportCapacityLocked(r, *msg.Runner, j.job.ID)
 					delete(r.active, j.job.ID)
 					delete(s.locks, j.key)
@@ -180,6 +185,7 @@ func (s *Server) stopTransportLocked(r *registration) {
 		return
 	}
 	r.stopped = true
+	s.opts.Logger.Printf("runner transport disconnected runner_id=%q registration_id=%q", r.info.ID, r.id)
 	close(r.done)
 	r.outbox = nil
 	_ = r.conn.Close()

@@ -93,6 +93,14 @@ local shell cannot be intercepted by this CLI.
 
 The ID is printed immediately to stderr. The CLI waits, then prints **completed
 output** to stdout and exit status to stderr. There is no live output stream.
+Timestamped stderr progress starts immediately before Git checks, reports queue
+and assigned-runner state, and prints a waiting update every ten seconds during
+long jobs. Server and worker terminals log connections, job receipt/dispatch,
+window selection, completion, cancellation, and heartbeat availability transitions.
+Job panes show preparation, worktree root, and hook/execution phases. These progress
+logs do not contain full command arguments, environments, or remote URL credentials,
+and do not change the completed command payload on stdout.
+
 Ctrl-C requests cancellation and attempts to collect available output. Command
 exit codes are mirrored; timeout is 124, infrastructure/preflight failure 125,
 cancellation 130, usage error 2. Inspect job state to distinguish commands that

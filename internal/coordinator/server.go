@@ -3,6 +3,8 @@ package coordinator
 
 import (
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -13,12 +15,14 @@ import (
 )
 
 // Options selects lifetime-owned output storage and heartbeat policy. Zero
-// heartbeat values use defaults. Now must be safe for concurrent calls.
+// heartbeat values use defaults. Now must be safe for concurrent calls. Logger
+// defaults to timestamped coordinator stderr logs; configure it before New.
 type Options struct {
 	OutputDir         string
 	HeartbeatInterval time.Duration
 	MissLimit         int
 	Now               func() time.Time
+	Logger            *log.Logger
 }
 
 type record struct {
@@ -65,6 +69,9 @@ type Server struct {
 
 // New creates a fresh owned spool and starts the heartbeat ticker.
 func New(opts Options) (*Server, error) {
+	if opts.Logger == nil {
+		opts.Logger = log.New(os.Stderr, "coordinator: ", log.LstdFlags)
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -87,6 +94,7 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{opts: opts, dir: dir, jobs: make(map[string]*record), runners: make(map[string]*registration), locks: make(map[protocol.Source]string), connections: make(map[*websocket.Conn]bool), stop: make(chan struct{}), lastTick: opts.Now()}
+	s.opts.Logger.Printf("coordinator started heartbeat_interval=%s miss_limit=%d", opts.HeartbeatInterval, opts.MissLimit)
 	s.wg.Add(1)
 	go s.heartbeats()
 	return s, nil
@@ -97,6 +105,7 @@ func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
+		s.opts.Logger.Print("coordinator shutdown started; remote processes are not killed")
 		s.closed = true
 		close(s.stop)
 		for _, r := range s.runners {
@@ -116,6 +125,7 @@ func (s *Server) Close() error {
 			}
 		}
 		s.closeErr = errors.Join(s.closeErr, os.RemoveAll(s.dir))
+		s.opts.Logger.Printf("coordinator shutdown complete cleanup_ok=%t", s.closeErr == nil)
 	})
 	return s.closeErr
 }
@@ -152,6 +162,7 @@ func (s *Server) dispatchLocked() {
 		j.job.State = "running"
 		j.job.RunnerID = chosen.info.ID
 		j.job.StartedAt = s.opts.Now()
+		s.opts.Logger.Printf("job dispatched job_id=%q runner_id=%q branch=%q state=running", id, chosen.info.ID, j.job.Source.Branch)
 		chosen.active[id] = true
 		s.locks[j.key] = id
 		copy := j.job
@@ -191,6 +202,11 @@ func (s *Server) finishLocked(j *record, r *registration, m protocol.Message) {
 			j.job.Error += "; runner result: " + m.Error
 		}
 	}
+	exitCode := "unknown"
+	if j.job.ExitCode != nil {
+		exitCode = fmt.Sprint(*j.job.ExitCode)
+	}
+	s.opts.Logger.Printf("job completed job_id=%q runner_id=%q state=%q exit_code=%s", j.job.ID, j.job.RunnerID, j.job.State, exitCode)
 	if r != nil {
 		delete(r.active, j.job.ID)
 	}

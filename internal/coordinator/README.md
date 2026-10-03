@@ -6,6 +6,20 @@ closes spool files, and removes only its fresh owned temporary output directory.
 It does **not** cancel or kill remote processes. The caller owns HTTP listener
 shutdown. Restart forgets registry, queue, jobs, and output history.
 
+## Lifecycle logs
+
+The default logger writes component-prefixed, host-local date/time timestamps to
+stderr. `Options.Logger` accepts a caller-owned `*log.Logger` for capture/routing;
+configure its prefix/flags before `New` and keep its output alive through `Close`.
+Logs identify accepted registrations (ID, priority, slots, socket peer), job
+receipt (ID, quoted branch, project basename), dispatch, terminal outcome/exit
+code, cancellation requests, accepted declines, and transport loss. First
+heartbeat miss, recovery, cutoff, startup and shutdown are logged; healthy
+heartbeats, management polling and output chunks are silent. Remote URLs,
+credentials, command arguments, output payloads and raw runner errors are not
+logged. Active cancellation is a request, not completion; disconnect/shutdown
+logs do not imply remote processes were killed.
+
 ## HTTP management
 
 Only the socket peer (`Request.RemoteAddr`) may authorize management. IPv4/IPv6

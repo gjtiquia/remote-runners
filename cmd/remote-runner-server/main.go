@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -84,13 +85,15 @@ func run() error {
 	defer stop()
 	served := make(chan error, 1)
 	go func() { served <- httpServer.Serve(listener) }()
-	fmt.Fprintln(os.Stderr, "remote-runner-server listening on", listener.Addr())
+	logger := log.New(os.Stderr, "remote-runner-server: ", log.LstdFlags)
+	logger.Println("remote-runner-server listening on", listener.Addr())
 	select {
 	case err := <-served:
 		if !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve: %w", err)
 		}
 	case <-ctx.Done():
+		logger.Print("shutdown requested; draining HTTP")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		shutdownErr := httpServer.Shutdown(shutdownCtx)
@@ -99,6 +102,7 @@ func run() error {
 		if shutdownErr != nil {
 			_ = httpServer.Close()
 		}
+		logger.Printf("shutdown complete cleanup_ok=%t", shutdownErr == nil && closeErr == nil)
 		return errors.Join(shutdownErr, closeErr)
 	}
 	return s.Close()

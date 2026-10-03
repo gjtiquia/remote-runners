@@ -1,7 +1,6 @@
 package coordinator
 
 import (
-	"log"
 	"time"
 
 	"github.com/gjtiquia/remote-runners/internal/protocol"
@@ -10,7 +9,7 @@ import (
 func (s *Server) deregisterLocked(r *registration, reason string) {
 	delete(s.runners, r.info.ID)
 	s.stopTransportLocked(r)
-	log.Printf("runner %q registration %q deregistered: %s", r.info.ID, r.id, reason)
+	s.opts.Logger.Printf("runner deregistered runner_id=%q registration_id=%q reason=%q", r.info.ID, r.id, reason)
 	for id := range r.active {
 		s.finishLocked(s.jobs[id], r, protocol.Message{State: "failed", Error: reason})
 	}
@@ -42,6 +41,9 @@ func (s *Server) Tick(now time.Time) {
 	for _, r := range s.runners {
 		if r.awaiting {
 			r.info.Misses++
+			if r.info.Misses == 1 {
+				s.opts.Logger.Printf("runner heartbeat missed runner_id=%q misses=1; dispatch suspended", r.info.ID)
+			}
 		}
 	}
 	// Make every runner's eligibility current before releasing any branch locks.

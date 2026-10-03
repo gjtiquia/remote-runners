@@ -36,8 +36,11 @@ the prepared worktree root, not the requester's corresponding subdirectory.
 ## Waiting and results
 
 The coordinator is `http://127.0.0.1:2461`; `-p` selects ports 1–65535. The stable
-`job ID: ...` is printed to stderr immediately after acceptance. The CLI polls
-status every 200 ms, without live output. On terminal state it copies the final
+`job ID: ...` is printed to stderr immediately after acceptance. Timestamped
+progress starts before Git preflight, then reports source validation, submission,
+queue/running state and assigned runner, completed-output retrieval, and exit status.
+While queued/running it prints a waiting update every ten seconds—not every poll.
+The CLI polls status every 200 ms, without live command output. On terminal state it copies the final
 HTTP output body to stdout through `client.Output`/`io.Copy`; no whole-output RAM
 buffer is used. Diagnostics and `exit code: ...` go to stderr. The timeout is
 30 minutes by default, must be positive, includes remote preparation/hooks and

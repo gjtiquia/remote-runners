@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,6 +39,7 @@ type jobWindow struct {
 }
 type activeJob struct{ cancelPath string }
 type worker struct {
+	logger         *log.Logger
 	cfg            Config
 	terminal       terminal
 	conn           *websocket.Conn
@@ -57,6 +59,8 @@ type worker struct {
 // before restarting; only completed UI windows are discovered, never orphan
 // executions. There is no automatic re-registration.
 func Run(ctx context.Context, cfg Config) error {
+	logger := progressLogger("remote-runner")
+	logger.Printf("runner=%q checking tmux/config roots repos=%q worktrees=%q", cfg.Name, cfg.Repos, cfg.Worktrees)
 	if err := cfg.validate(); err != nil {
 		return err
 	}
@@ -91,11 +95,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if endpoint.Path == "" || endpoint.Path == "/" {
 		endpoint.Path = "/runner"
 	}
+	logger.Printf("runner=%q connecting", cfg.Name)
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, endpoint.String(), nil)
 	if err != nil {
 		return err
 	}
-	w := &worker{cfg: cfg, terminal: term, conn: conn, executable: executable, environment: os.Environ(), windows: windows, jobs: make(map[string]activeJob), disconnected: make(chan struct{})}
+	w := &worker{logger: logger, cfg: cfg, terminal: term, conn: conn, executable: executable, environment: os.Environ(), windows: windows, jobs: make(map[string]activeJob), disconnected: make(chan struct{})}
 	defer w.disconnect()
 	go func() {
 		select {
@@ -117,6 +122,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("coordinator did not acknowledge registration")
 	}
 	w.registration = registered.RegistrationID
+	w.progress("registered registration=%q session=%q window=%q", w.registration, term.session, term.window)
 	_ = conn.SetReadDeadline(time.Time{})
 	for {
 		var message protocol.Message
@@ -135,14 +141,17 @@ func Run(ctx context.Context, cfg Config) error {
 			if message.Job == nil {
 				return fmt.Errorf("assignment missing job")
 			}
+			w.progress("job=%q received project=%q branch=%q", message.Job.ID, projectLabel(message.Job.Source.Remote), message.Job.Source.Branch)
 			if err = w.start(*message.Job); err != nil {
 				var refused *noCapacityError
 				if errors.As(err, &refused) {
+					w.progress("job=%q capacity refused active_jobs=%d slots=%d", message.Job.ID, refused.info.ActiveJobs, refused.info.Slots)
 					if e := w.send(protocol.Message{Type: "decline", JobID: message.Job.ID, Runner: &refused.info}); e != nil {
 						return e
 					}
 				} else {
 					code := 125
+					w.progress("job=%q completed state=%q exit=125 (launch failed)", message.Job.ID, "failed")
 					if e := w.sendCapacity(protocol.Message{Type: "complete", JobID: message.Job.ID, State: "failed", ExitCode: &code, Error: err.Error()}); e != nil {
 						return e
 					}
@@ -153,6 +162,7 @@ func Run(ctx context.Context, cfg Config) error {
 			job, ok := w.jobs[message.JobID]
 			w.mu.Unlock()
 			if ok {
+				w.progress("job=%q cancel requested", message.JobID)
 				if err = os.WriteFile(job.cancelPath, []byte("cancel\n"), 0600); err != nil {
 					return fmt.Errorf("request cancellation: %w", err)
 				}
@@ -161,7 +171,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 func (w *worker) disconnect() {
-	w.disconnectOnce.Do(func() { close(w.disconnected); _ = w.conn.Close() })
+	w.disconnectOnce.Do(func() {
+		w.progress("disconnected; local jobs continue")
+		close(w.disconnected)
+		_ = w.conn.Close()
+	})
 }
 
 // Sample capacity in wire order, not before waiting for a concurrent writer.
@@ -275,7 +289,9 @@ func (w *worker) start(job protocol.Job) error {
 	gate := filepath.Join(dir, "launch-ready")
 	command := "while [ ! -f " + quote(gate) + " ]; do sleep 0.05; done; exec " + quote(w.executable) + " job-exec " + quote(descriptorPath)
 	var out []byte
+	windowAction := "reused"
 	if window == nil {
+		windowAction = "new"
 		out, err = w.terminal.output("new-window", "-d", "-t", w.terminal.session+":", "-n", job.ID, "-P", "-F", "#{window_id}\t#{pane_id}", "/bin/sh", "-c", command)
 		if err == nil {
 			ids := strings.Fields(string(out))
@@ -295,6 +311,7 @@ func (w *worker) start(job protocol.Job) error {
 		w.disconnect() // Creation/respawn may have succeeded despite a lost reply.
 		return fmt.Errorf("launch job window: %w: %s", err, out)
 	}
+	w.progress("job=%q %s window=%q pane=%q", job.ID, windowAction, window.id, window.pane)
 	window.active = true
 	window.used = used
 	w.jobs[job.ID] = activeJob{cancelPath: descriptor.CancelPath}
@@ -305,6 +322,7 @@ func (w *worker) start(job protocol.Job) error {
 		w.disconnect() // Keep the pending pane occupied; only an operator may stop it.
 		return fmt.Errorf("confirm job window launch (stop pending pane manually): %w", err)
 	}
+	w.progress("job=%q running helper window=%q pane=%q", job.ID, window.id, window.pane)
 	go w.monitor(job, window, descriptor)
 	return nil
 }
@@ -343,6 +361,7 @@ func (w *worker) monitor(job protocol.Job, window *jobWindow, d JobDescriptor) {
 	w.mu.Unlock()
 	// Output is transferred only after completion, bounded per message and never
 	// accumulated in RAM. Broken transport does not affect the helper's lifetime.
+	w.progress("job=%q output transfer starting", job.ID)
 	file, err := os.Open(d.OutputPath)
 	if err == nil {
 		buffer := make([]byte, 32<<10)
@@ -367,9 +386,13 @@ func (w *worker) monitor(job protocol.Job, window *jobWindow, d JobDescriptor) {
 		result.State = "failed"
 		result.ExitCode = &code
 		result.Error = "completed output transfer: " + err.Error()
+		w.progress("job=%q output transfer failed", job.ID)
+	} else {
+		w.progress("job=%q output transfer finished", job.ID)
 	}
 	result.Type = "complete"
 	result.JobID = job.ID
+	w.progress("job=%q completed state=%q exit=%s commit=%q window=%q pane=%q", job.ID, result.State, exitLabel(result.ExitCode), result.Commit, window.id, window.pane)
 	_ = w.sendCapacity(result)
 }
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }

@@ -63,6 +63,11 @@ func JobExec(path string) error {
 		return err
 	}
 	defer output.Close()
+	// Progress goes only to terminal stderr, never through the payload tee.
+	logger := progressLogger("remote-runner-job")
+	progress := func(format string, args ...any) {
+		logger.Printf("job=%q pane=%q "+format, append([]any{d.Job.ID, pane}, args...)...)
+	}
 	writer := io.MultiWriter(output, os.Stdout)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
@@ -88,13 +93,18 @@ func JobExec(path string) error {
 		}
 	}()
 	result := protocol.Message{Type: "complete", JobID: d.Job.ID, State: "failed"}
+	progress("checking Git/preparing worktree repos=%q worktrees=%q", d.Roots.Repos, d.Roots.Worktrees)
 	prepared, err := workspace.Prepare(ctx, d.Roots, d.Job.Source, writer)
 	result.Commit = prepared.Commit
 	code := 1
 	if err == nil {
-		err = runHooks(ctx, prepared, writer)
+		progress("worktree ready root=%q commit=%q", prepared.Root, prepared.Commit)
+		err = runHooks(ctx, prepared, writer, progress)
 	}
 	if err == nil {
+		if len(d.Job.Args) > 0 {
+			progress("executing executable=%q root=%q", filepath.Base(d.Job.Args[0]), prepared.Root)
+		}
 		code, err = execute(ctx, prepared.Root, d.Job.Args, writer)
 	}
 	if err == nil {
@@ -123,6 +133,7 @@ func JobExec(path string) error {
 		result.State = "failed"
 		result.Error = "output close: " + e.Error()
 	}
+	progress("completed state=%q exit=%d commit=%q", result.State, code, result.Commit)
 	data, err = json.Marshal(result)
 	if err != nil {
 		return err
@@ -139,7 +150,7 @@ type projectHooks struct {
 	BeforeJobCommand           string
 }
 
-func runHooks(ctx context.Context, prepared workspace.Prepared, output io.Writer) error {
+func runHooks(ctx context.Context, prepared workspace.Prepared, output io.Writer, progress func(string, ...any)) error {
 	path := filepath.Join(prepared.Root, ".remote-runner.json")
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return nil
@@ -171,14 +182,15 @@ func runHooks(ctx context.Context, prepared workspace.Prepared, output io.Writer
 	if err = json.Unmarshal(data, &hooks); err != nil {
 		return fmt.Errorf(".remote-runner.json: %w", err)
 	}
-	commands := []string{}
+	commands := []struct{ phase, command string }{}
 	if prepared.Created {
-		commands = append(commands, hooks.AfterCreateWorktreeCommand)
+		commands = append(commands, struct{ phase, command string }{"creation", hooks.AfterCreateWorktreeCommand})
 	}
-	commands = append(commands, hooks.BeforeJobCommand)
-	for _, command := range commands {
-		if command != "" {
-			if _, err = execute(ctx, prepared.Root, []string{"/bin/sh", "-c", command}, output); err != nil {
+	commands = append(commands, struct{ phase, command string }{"before-job", hooks.BeforeJobCommand})
+	for _, hook := range commands {
+		if hook.command != "" {
+			progress("running %s hook root=%q", hook.phase, prepared.Root)
+			if _, err = execute(ctx, prepared.Root, []string{"/bin/sh", "-c", hook.command}, output); err != nil {
 				return fmt.Errorf("project hook: %w", err)
 			}
 		}

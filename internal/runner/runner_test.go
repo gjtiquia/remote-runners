@@ -1,6 +1,7 @@
 package runner_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -61,10 +62,13 @@ func helper(t *testing.T, bin, source, base string, args []string, env []string)
 		t.Fatal(err)
 	}
 	c := exec.Command(bin, "job-exec", path)
-	out, err := c.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	c.Stdout, c.Stderr = &stdout, &stderr
+	err := c.Run()
 	if err != nil {
-		t.Fatalf("helper infrastructure: %v %s", err, out)
+		t.Fatalf("helper infrastructure: %v stdout=%s stderr=%s", err, &stdout, &stderr)
 	}
+	out := stdout.Bytes()
 	data, err = os.ReadFile(filepath.Join(base, "result"))
 	if err != nil {
 		t.Fatalf("result: %v %s", err, out)
@@ -77,8 +81,8 @@ func helper(t *testing.T, bin, source, base string, args []string, env []string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), string(output)) {
-		t.Fatalf("disk output not also in terminal: %s / %s", output, out)
+	if !bytes.Equal(out, output) {
+		t.Fatalf("stdout must match disk payload without stderr diagnostics: %s / %s (stderr=%s)", output, out, &stderr)
 	}
 	return result, string(output)
 }
@@ -425,6 +429,11 @@ func TestTimeoutIncludesBeforeJobHook(t *testing.T) {
 	result, out := f.wait(t, j.ID)
 	if result.State != "timed_out" || result.ExitCode == nil || *result.ExitCode != 124 || !strings.Contains(out, "HOOK_STARTED") || strings.Contains(out, "SHOULD_NOT_RUN") {
 		t.Fatalf("hook timeout: %+v %s", result, out)
+	}
+	logs := f.tmux(t, "capture-pane", "-p", "-J", "-S", "-", "-t", f.window(t, j.ID))
+	assertProgress(t, logs, "remote-runner-job", `completed state="timed_out" exit=124`)
+	if strings.Contains(out, "remote-runner-job ") || strings.Contains(logs, `executing executable="echo"`) {
+		t.Fatalf("timed-out hook leaked progress into payload or started the command: output=%s pane=%s", out, logs)
 	}
 }
 

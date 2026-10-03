@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -70,6 +71,7 @@ func run(ctx context.Context) int {
 	if err != nil {
 		return failure(err)
 	}
+	progress("checking Git source (clean checkout and pushed branch)")
 	source, err := workspace.Preflight(ctx, dir, workspace.Overrides{Repository: *repository, Remote: *remote, Branch: *branch})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -77,6 +79,8 @@ func run(ctx context.Context) int {
 		}
 		return failure(err)
 	}
+	progress("Git source ready: branch=%q", source.Branch)
+	progress("submitting job to http://127.0.0.1:%d", *port)
 	api := client.New(fmt.Sprintf("http://127.0.0.1:%d", *port))
 	submitCtx, submitCancel := context.WithTimeout(ctx, 10*time.Second)
 	job, err := api.Submit(submitCtx, protocol.Submission{Source: source, Args: flags.Args(), Timeout: *timeout})
@@ -87,18 +91,18 @@ func run(ctx context.Context) int {
 		}
 		return failure(fmt.Errorf("submission failed; acceptance is unknown: inspect remote-run-utils -p %d jobs before resubmitting: %w", *port, err))
 	}
-	fmt.Fprintln(os.Stderr, "job ID:", job.ID)
+	progress("job ID: %s", job.ID)
 	job, err = waitJob(ctx, api, job)
 	cancelled := ctx.Err() != nil
 	if cancelled {
 		// The observation context is cancelled. Cancellation must use a fresh,
 		// short context, otherwise no HTTP request can reach the coordinator.
-		fmt.Fprintln(os.Stderr, "remote-run: requesting cancellation")
+		progress("requesting cancellation for job %s", job.ID)
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		cancelErr := api.Cancel(cancelCtx, job.ID)
 		cancel()
 		if cancelErr != nil {
-			fmt.Fprintln(os.Stderr, "remote-run: cancellation request failed:", cancelErr)
+			progress("cancellation request failed: %v", cancelErr)
 		}
 		settleCtx, settleCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		job, err = waitJob(settleCtx, api, job)
@@ -116,6 +120,7 @@ func run(ctx context.Context) int {
 		outputCtx, outputCancel = context.WithTimeout(context.Background(), 10*time.Second)
 	}
 	defer outputCancel()
+	progress("fetching completed output for job %s", job.ID)
 	if err = api.Output(outputCtx, job.ID, os.Stdout); err != nil {
 		if cancelled || ctx.Err() != nil {
 			return interrupted(fmt.Errorf("job %s: output transfer interrupted: %w", job.ID, err))
@@ -123,7 +128,7 @@ func run(ctx context.Context) int {
 		return failure(err)
 	}
 	if job.Error != "" {
-		fmt.Fprintln(os.Stderr, "remote-run:", job.Error)
+		progress("job %s: %s", job.ID, job.Error)
 	}
 	code := 125
 	switch {
@@ -134,15 +139,18 @@ func run(ctx context.Context) int {
 	case job.ExitCode != nil:
 		code = *job.ExitCode
 	default:
-		fmt.Fprintf(os.Stderr, "remote-run: job %s ended %s without an exit code\n", job.ID, job.State)
+		progress("job %s ended %s without an exit code", job.ID, job.State)
 	}
-	fmt.Fprintln(os.Stderr, "exit code:", code)
+	progress("exit code: %d", code)
 	return code
 }
 
 func waitJob(ctx context.Context, api *client.Client, job protocol.Job) (protocol.Job, error) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	started := time.Now()
+	nextProgress := started.Add(10 * time.Second)
+	logJobState(job)
 	for !job.Terminal() {
 		select {
 		case <-ctx.Done():
@@ -155,13 +163,36 @@ func waitJob(ctx context.Context, api *client.Client, job protocol.Job) (protoco
 		if err != nil {
 			return job, err
 		}
+		if next.State != job.State || next.RunnerID != job.RunnerID {
+			logJobState(next)
+			nextProgress = time.Now().Add(10 * time.Second)
+		} else if !next.Terminal() && !time.Now().Before(nextProgress) {
+			progress("job %s still %s on runner=%q (waiting %s; output appears on completion)", next.ID, next.State, next.RunnerID, time.Since(started).Round(time.Second))
+			nextProgress = time.Now().Add(10 * time.Second)
+		}
 		job = next
 	}
 	return job, nil
 }
 func interrupted(err error) int {
-	fmt.Fprintln(os.Stderr, "remote-run:", err)
-	fmt.Fprintln(os.Stderr, "exit code: 130")
+	progress("%v", err)
+	progress("exit code: 130")
 	return 130
 }
-func failure(err error) int { fmt.Fprintln(os.Stderr, "remote-run:", err); return 125 }
+func failure(err error) int { progress("%v", err); return 125 }
+
+func logJobState(job protocol.Job) {
+	switch job.State {
+	case "queued":
+		progress("job %s queued; waiting for an available runner", job.ID)
+	case "running":
+		progress("job %s running on runner=%q; waiting for completed output", job.ID, job.RunnerID)
+	default:
+		progress("job %s finished: state=%s runner=%q", job.ID, job.State, job.RunnerID)
+	}
+}
+
+// Progress is stderr-only; stdout remains the completed command payload.
+func progress(format string, args ...any) {
+	log.New(os.Stderr, "remote-run: ", log.LstdFlags).Printf(format, args...)
+}

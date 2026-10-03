@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -130,9 +132,11 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if parts[1] == "cancel" {
 		if j.job.State == "queued" {
+			s.opts.Logger.Printf("job cancellation requested job_id=%q runner_id=%q state=%q", j.job.ID, j.job.RunnerID, j.job.State)
 			s.finishLocked(j, nil, protocol.Message{State: "cancelled"})
 		} else if !j.job.Terminal() && !j.cancelRequested {
 			j.cancelRequested = true
+			s.opts.Logger.Printf("job cancellation requested job_id=%q runner_id=%q state=%q", j.job.ID, j.job.RunnerID, j.job.State)
 			if runner := s.runners[j.job.RunnerID]; runner != nil {
 				s.enqueueLocked(runner, protocol.Message{Type: "cancel", JobID: j.job.ID})
 			}
@@ -215,6 +219,18 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	j := &record{job: protocol.Job{ID: id, Submission: sub, State: "queued", CreatedAt: s.opts.Now()}, key: protocol.Source{Remote: identity, Branch: sub.Source.Branch}, output: f}
 	s.jobs[id] = j
 	s.order = append(s.order, id)
+	// Local identities contain literal filenames, not URL escapes. For network
+	// remotes, discard authority, userinfo, query and fragment before labeling.
+	projectPath := strings.TrimPrefix(identity, "file://")
+	if !strings.HasPrefix(identity, "file://") {
+		projectURL, err := url.Parse(identity)
+		projectPath = ""
+		if err == nil {
+			projectPath = projectURL.Path
+		}
+	}
+	project := strings.TrimSuffix(path.Base(projectPath), ".git")
+	s.opts.Logger.Printf("job received job_id=%q branch=%q project=%q state=queued", id, sub.Source.Branch, project)
 	s.dispatchLocked()
 	copy := j.job
 	s.mu.Unlock()

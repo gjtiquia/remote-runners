@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -40,6 +41,7 @@ func freePort(t *testing.T) int {
 }
 
 type serverProcess struct {
+	logPath string
 	command *exec.Cmd
 	done    chan struct{}
 	err     error // Read only after done closes.
@@ -58,7 +60,7 @@ func startServer(t *testing.T, binary string, port int, args ...string) (*server
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	process := &serverProcess{command: command, done: make(chan struct{})}
+	process := &serverProcess{command: command, done: make(chan struct{}), logPath: log.Name()}
 	go func() { process.err = command.Wait(); close(process.done) }()
 	t.Cleanup(func() {
 		select {
@@ -92,6 +94,37 @@ func startServer(t *testing.T, binary string, port int, args ...string) (*server
 	out, _ := os.ReadFile(log.Name())
 	t.Fatalf("server not ready: %s", out)
 	return nil, nil
+}
+
+func TestServerLogsTimestampedListeningAndGracefulShutdown(t *testing.T) {
+	process, _ := startServer(t, buildServer(t), freePort(t), "-output-dir", t.TempDir())
+	if err := process.command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-process.done:
+		if process.err != nil {
+			t.Fatal(process.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop")
+	}
+	data, err := os.ReadFile(process.logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	for _, event := range []string{"remote-runner-server listening on", "shutdown requested", "shutdown complete"} {
+		matched := false
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, event) && regexp.MustCompile(`^remote-runner-server: \d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} `).MatchString(line) {
+				matched = true
+			}
+		}
+		if !matched {
+			t.Fatalf("missing timestamped server event %q:\n%s", event, out)
+		}
+	}
 }
 
 func TestServerServesCoordinatorAndGracefullyClosesOnSIGTERM(t *testing.T) {
