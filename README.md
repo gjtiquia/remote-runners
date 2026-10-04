@@ -24,7 +24,9 @@ These remote install commands require the implementation to be pushed/released;
 `@latest` follows Go version selection, not necessarily the newest main commit.
 Binaries go to `GOBIN`, or usually `~/go/bin`; add that directory to `PATH`.
 Go is not required to run built binaries. Workers need Git, tmux (tested on 3.5a),
-SSH/repository access, and project tools such as Bun and browsers.
+SSH/repository access, and project tools such as Bun and browsers. The dedicated
+tmux session's effective `default-shell` must be Zsh (with its standard
+`zsh/parameter` module) or Bash 5.1+; older macOS system Bash is not supported.
 
 ## Start the coordinator
 
@@ -66,11 +68,30 @@ tmux new-session -s remote-runners
 remote-runner
 ```
 
-Keep the worker window running. Jobs appear in separate windows; repeated jobs
-reuse a worktree's idle window. At the retention limit the least-recently-used
-completed window is evicted, never an active/worker window. Worktrees stay on disk.
-Prefer launching from an environment with your desired project tools on `PATH`;
-job helpers inherit that environment rather than the tmux server's stale one.
+Keep the worker window running. Each worktree gets a real, persistent interactive
+**non-login** shell and your normal prompt. Zsh loads normal `.zshenv`/`.zshrc`
+(including `ZDOTDIR`); Bash loads `.bashrc`. Private startup wrappers and prompt
+hooks are generated in the job directory; your dotfiles are never edited. After
+preparation/execution the shell changes to the prepared worktree root and receives
+the command status. Later jobs reuse that same window and shell, without respawn.
+At the retention limit the least-recently-used verified idle job pane is evicted,
+never an active/worker pane or an entire window. Worktrees stay on disk.
+
+**Environment:** launch the worker with your desired baseline exports and `PATH`.
+Those keys explicitly override tmux's environment when creating the shell; normal
+tmux globals may also be present (this is not strict environment isolation).
+Shell startup and subsequent manual exports define the actual pane environment
+inherited by preparation, hooks, and commands. `TMUX`, `TMUX_PANE`, and `TERM`
+belong to the job pane.
+
+**Manual use:** leave an untouched primary prompt and do not type while submitting.
+A manual foreground command (including a builtin), or a running/stopped background
+job, fails submission immediately with exit 125, `worktree window is busy`—no
+waiting, requeueing, or cancellation injected into your command. Half-typed input
+and continuation prompts cannot be detected externally. Copy mode, extra panes,
+a replaced shell, or invalid prompt hooks fail closed. After a background job
+finishes, press Enter to refresh prompt state if needed. Only a newly created
+shell's startup may wait up to ten seconds for its first supported prompt.
 
 ## Submit from the coordinator machine
 
@@ -88,6 +109,8 @@ whether to commit/stash, push, or synchronize. Defaults: current checkout/branch
 `origin`, and 30 minutes for preparation, hooks, and execution (not queue waiting).
 
 Submit one executable plus arguments, not shell pipes, redirections, or `&&`.
+Arguments remain structured and execute directly through Go, not shell
+interpolation; shell aliases/functions are not supported as job executables.
 Put compound logic in a project script. Operators already interpreted by your
 local shell cannot be intercepted by this CLI.
 
@@ -125,8 +148,8 @@ Commit optional **`.remote-runner.json`** at the project root:
 
 The first hook runs only on creation, the second every job. Both use `/bin/sh -c`;
 failure prevents job execution. Jobs execute their argument vector directly.
-Untracked hook files are ignored. All phases share the launching worker's
-environment; personal interactive shell startup files are not sourced implicitly.
+Untracked hook files are ignored. All phases inherit the persistent job pane's
+environment, including normal shell startup exports and later manual exports.
 
 ## Inspect and cancel
 
@@ -156,19 +179,29 @@ elsewhere. There are no reconnects, retries, notifications, or result reconcilia
 
 Before restarting/re-registering a worker:
 
-1. Ctrl-C **each old job window** and confirm its processes have exited.
+1. Stop old jobs/manual applications in job windows and confirm their processes
+   have exited. A stopped job is not an exited job; resume it with `fg` and stop
+   it if necessary. Leave retained shells at untouched primary prompts, outside
+   copy mode and without extra panes.
 2. Stop and start `remote-runner` again.
 
-Ctrl-C on the worker alone does not stop its jobs. Human teardown is a prerequisite;
-there is no orphan discovery or occupancy restoration. Tagged completed job
-windows are retained/reused across same-session restarts; startup rejects a still-live
-old helper and asks you to stop it. This retention metadata does not recover jobs
-or results.
+Ctrl-C on the worker alone does not stop its jobs. Verified, tagged **live idle
+shells** may survive same-session restarts; running old helpers, manual activity,
+and untagged/unsafe windows prevent startup. Retention is UI bookkeeping, not
+job-history or orphan recovery. A suspended helper must actually exit before its
+window can be reused; `fg` then completion returns to the worktree prompt. If shell
+identity or completion cannot be confirmed, close that window manually.
+
+**Upgrading from the old dead-helper windows (version 1):** stop old jobs and
+manually close completed legacy job windows before starting the updated runner.
+It will not adopt or force-kill them.
 
 Coordinator restart forgets queue, registry, and job history. Stop old jobs,
 restart workers, and resubmit desired work. Output is disk-backed without deliberate
-truncation; coordinator output lasts for its lifetime. Worker job directories and
-crash-left coordinator spools require manual disk cleanup. Admission thresholds
+truncation; coordinator output lasts for its lifetime. Private worker job directories
+(0700 directories/0600 files, including shell startup files) must be kept while
+the associated window exists; delete them manually **only after closing that
+window**. Crash-left coordinator spools also require manual disk cleanup. Admission thresholds
 are not hard memory caps, and commands may still exhaust machine resources.
 
 ## Development and validation
@@ -183,8 +216,13 @@ GOOS=darwin GOARCH=amd64 go build ./cmd/...
 
 Tests use the public coordinator/client contract, controlled scheduling/time
 inputs, and real temporary Git repositories, processes, loopback networking, and
-isolated test-owned tmux sockets. They do not require a personal repository or
-laptop deployment. Cross-compilation does not replace actual macOS runtime trials.
+isolated test-owned tmux sockets. Race-build-tag fixtures also instrument the real
+worker/helper subprocesses under `go test -race`; regular builds need neither
+CGO nor a C compiler. Optional Zsh coverage uses `zsh` on `PATH`, or
+`REMOTE_RUNNERS_TEST_ZSH` (executable) and `REMOTE_RUNNERS_TEST_ZSH_MODULE_PATH`
+(module directory) for a privately extracted Zsh. Tests do not require a personal
+repository or laptop deployment. Cross-compilation does not replace actual macOS
+runtime trials.
 
 Details: [coordinator/protocol](internal/coordinator/README.md),
 [runner](internal/runner/README.md), [Git/workspaces](internal/workspace/README.md),

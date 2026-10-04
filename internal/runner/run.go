@@ -10,8 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gjtiquia/remote-runners/internal/protocol"
@@ -32,10 +34,11 @@ func (e *noCapacityError) Error() string { return ErrNoCapacity.Error() }
 func (e *noCapacityError) Unwrap() error { return ErrNoCapacity }
 
 type jobWindow struct {
-	id     string
-	pane   string
-	active bool
-	used   time.Time
+	id         string
+	pane       string
+	shellToken string
+	active     bool
+	used       time.Time
 }
 type activeJob struct{ cancelPath string }
 type worker struct {
@@ -247,13 +250,24 @@ func (w *worker) start(job protocol.Job) error {
 	if window == nil && len(w.windows) >= w.cfg.MaxWindows {
 		var oldest *jobWindow
 		var source protocol.Source
+		var protected error
 		for key, candidate := range w.windows {
-			if !candidate.active && candidate.id != w.terminal.window && (oldest == nil || candidate.used.Before(oldest.used)) {
+			if candidate.active || candidate.id == w.terminal.window {
+				continue
+			}
+			if err := w.terminal.verifyCompletedWindow(key, candidate); err != nil {
+				protected = err
+				continue
+			}
+			if oldest == nil || candidate.used.Before(oldest.used) {
 				oldest = candidate
 				source = key
 			}
 		}
 		if oldest == nil {
+			if protected != nil {
+				return protected // Manual activity never waits/requeues for a window.
+			}
 			capacity.Available = false
 			capacity.Slots = 0
 			return &noCapacityError{info: capacity}
@@ -271,7 +285,7 @@ func (w *worker) start(job protocol.Job) error {
 	if err != nil {
 		return err
 	}
-	descriptor := JobDescriptor{Roots: workspace.Roots{Repos: w.cfg.Repos, Worktrees: w.cfg.Worktrees}, Job: job, Environment: w.environment, OutputPath: filepath.Join(dir, "output"), ResultPath: filepath.Join(dir, "result.json"), CancelPath: filepath.Join(dir, "cancel")}
+	descriptor := JobDescriptor{Roots: workspace.Roots{Repos: w.cfg.Repos, Worktrees: w.cfg.Worktrees}, Job: job, OutputPath: filepath.Join(dir, "output"), ResultPath: filepath.Join(dir, "result.json"), CancelPath: filepath.Join(dir, "cancel"), ProcessPath: filepath.Join(dir, "helper.pid"), ReturnedPath: filepath.Join(dir, "shell-returned"), ShellScriptPath: filepath.Join(dir, "shell-result")}
 	data, err := json.Marshal(descriptor)
 	if err != nil {
 		return err
@@ -280,48 +294,56 @@ func (w *worker) start(job protocol.Job) error {
 	if err = os.WriteFile(descriptorPath, data, 0600); err != nil {
 		return err
 	}
-	// The helper is the actual foreground program in the tmux pane. It receives
-	// terminal SIGINT, then cancels preparation/hooks/command process groups.
-	used := time.Now()
-	// Only this parent releases the private gate, after confirming the tag.
-	// A crash before tagging leaves a visibly untagged, non-executing pane;
-	// startup rejects it rather than overlooking a delayed self-tagging shell.
-	gate := filepath.Join(dir, "launch-ready")
-	command := "while [ ! -f " + quote(gate) + " ]; do sleep 0.05; done; exec " + quote(w.executable) + " job-exec " + quote(descriptorPath)
-	var out []byte
 	windowAction := "reused"
 	if window == nil {
 		windowAction = "new"
-		out, err = w.terminal.output("new-window", "-d", "-t", w.terminal.session+":", "-n", job.ID, "-P", "-F", "#{window_id}\t#{pane_id}", "/bin/sh", "-c", command)
-		if err == nil {
-			ids := strings.Fields(string(out))
-			if len(ids) != 2 || !strings.HasPrefix(ids[0], "@") || !strings.HasPrefix(ids[1], "%") || ids[0] == w.terminal.window {
-				w.disconnect() // An unconfirmed pane may exist; do not admit more work.
-				return fmt.Errorf("invalid job window/pane IDs: %q", out)
+		window, err = w.terminal.newShellWindow(job.ID, dir, w.environment)
+		if window == nil {
+			// Unsupported configuration is a definite early failure. Only lost
+			// creation replies require disconnecting to avoid uncertain admission.
+			if errors.Is(err, errShellLaunchUncertain) {
+				w.disconnect()
 			}
-			window = &jobWindow{id: ids[0], pane: ids[1]}
-			w.windows[key] = window
+			return err
 		}
-	} else {
-		// Without -k tmux itself refuses to replace a live pane, even if it
-		// changed after our inspection. Never destroy another inspection pane.
-		out, err = w.terminal.output("respawn-pane", "-t", window.pane, "/bin/sh", "-c", command)
-	}
-	if err != nil {
-		w.disconnect() // Creation/respawn may have succeeded despite a lost reply.
-		return fmt.Errorf("launch job window: %w: %s", err, out)
+		w.windows[key] = window
+		if err != nil {
+			window.used = time.Now()
+			if tagErr := w.terminal.tagWindow(key, window); tagErr != nil {
+				w.disconnect()
+				return tagErr
+			}
+			return err
+		}
 	}
 	w.progress("job=%q %s window=%q pane=%q", job.ID, windowAction, window.id, window.pane)
+	window.used = time.Now()
+	// Confirm UI ownership before sending anything. A parent crash before this
+	// point leaves only an untagged shell, never a delayed executable launch.
+	if err = w.terminal.tagWindow(key, window); err != nil {
+		w.disconnect()
+		return fmt.Errorf("confirm job window ownership: %w", err)
+	}
+	// The helper inherits this interactive shell's environment. After it returns,
+	// put the shell in the prepared worktree and preserve the command exit status.
+	// A stopped helper must not clear the job marker or release its execution slot.
+	command := "__rr_pending_script=" + quote(descriptor.ShellScriptPath) + "; __rr_pending_pid=" + quote(descriptor.ProcessPath) + "; " +
+		quote(w.executable) + " job-exec " + quote(descriptorPath) + "; __rr_helper_status=$?; __rr_job_status=$__rr_helper_status; " +
+		"if (( __rr_helper_status < 128 )) || { [[ -r \"$__rr_pending_pid\" ]] && ! builtin kill -0 \"$(<\"$__rr_pending_pid\")\" 2>/dev/null; }; then " +
+		"if [[ -f \"$__rr_pending_script\" ]]; then builtin source \"$__rr_pending_script\"; fi; " +
+		"command " + quote(w.terminal.binary) + " -S " + quote(w.terminal.socket) + " set-option -p -t \"$TMUX_PANE\" " + shellJobOption + " 0; " +
+		"unset __rr_pending_script __rr_pending_pid; fi; " +
+		"builtin printf '%s\\n' \"$__rr_helper_status\" > " + quote(descriptor.ReturnedPath) + "; (builtin exit \"$__rr_job_status\")"
+	if err = w.terminal.sendShellCommand(window, command); err != nil {
+		// A definite busy refusal has not started anything. A transport error may
+		// have sent keys: disconnect rather than retrying an uncertain launch.
+		if !errors.Is(err, ErrShellBusy) {
+			w.disconnect()
+		}
+		return err
+	}
 	window.active = true
-	window.used = used
 	w.jobs[job.ID] = activeJob{cancelPath: descriptor.CancelPath}
-	if err = w.terminal.tagWindow(key, window); err == nil {
-		err = os.WriteFile(gate, nil, 0600)
-	}
-	if err != nil {
-		w.disconnect() // Keep the pending pane occupied; only an operator may stop it.
-		return fmt.Errorf("confirm job window launch (stop pending pane manually): %w", err)
-	}
 	w.progress("job=%q running helper window=%q pane=%q", job.ID, window.id, window.pane)
 	go w.monitor(job, window, descriptor)
 	return nil
@@ -331,19 +353,26 @@ func (w *worker) monitor(job protocol.Job, window *jobWindow, d JobDescriptor) {
 	defer ticker.Stop()
 	var result protocol.Message
 	for range ticker.C {
-		// A published result alone is not proof that the foreground helper has
-		// exited. Keep the window active until its exact pane is dead.
-		// Inaccessible results or unqueryable tmux are not proof that the
-		// helper stopped. Keep the slot/window active until completion is known.
+		// A prompt or shell-returned marker alone is insufficient: job control can
+		// return a stopped helper to the prompt. Confirm its known PID has exited.
+		// The shell itself stays alive across jobs; no pane-death/respawn lifecycle.
 		if window.pane == "" {
 			continue
 		}
+		returnedData, returned := os.ReadFile(d.ReturnedPath)
+		returnedCode, codeErr := strconv.Atoi(strings.TrimSpace(string(returnedData)))
+		pidData, pidErr := os.ReadFile(d.ProcessPath)
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidData)))
+		helperExited := pidErr == nil && parseErr == nil && pid > 0 && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		out, e := w.terminal.command(ctx, "display-message", "-p", "-t", window.pane, "#{pane_dead}").Output()
 		cancel()
-		if e == nil && strings.TrimSpace(string(out)) == "1" {
-			// A dead pane proves no more result writes can occur. Read only
-			// after that observation to avoid racing atomic result publication.
+		paneDead := e == nil && strings.TrimSpace(string(out)) == "1"
+		// A normal (<128) return without a PID means the executable failed before
+		// helper initialization, not a stopped foreground process.
+		neverInitialized := os.IsNotExist(pidErr) && codeErr == nil && returnedCode >= 0 && returnedCode < 128
+		if (returned == nil && (helperExited || neverInitialized)) || (paneDead && (helperExited || os.IsNotExist(pidErr))) {
+			// Read after process exit, so atomic result publication is complete.
 			data, err := os.ReadFile(d.ResultPath)
 			if err == nil {
 				if err = json.Unmarshal(data, &result); err != nil {
@@ -354,6 +383,11 @@ func (w *worker) monitor(job protocol.Job, window *jobWindow, d JobDescriptor) {
 			}
 			break
 		}
+	}
+	// Job control may have returned the original shell wrapper before the helper
+	// exited (Ctrl-Z, then fg). Only this observed-exit path may clear that lease.
+	if _, err := w.terminal.output("set-option", "-p", "-t", window.pane, shellJobOption, "0"); err != nil {
+		w.progress("job=%q cannot clear completed shell lease; inspect window=%q", job.ID, window.id)
 	}
 	w.mu.Lock()
 	window.active = false

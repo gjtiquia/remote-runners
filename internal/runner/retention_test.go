@@ -197,6 +197,12 @@ func TestReducedWindowBudgetRejectsProtectedInspectionPanes(t *testing.T) {
 
 func TestRestartRequiresHumanToStopLiveTaggedJobPane(t *testing.T) {
 	f := startRunner(t)
+	home := filepath.Join(filepath.Dir(f.socket), "home")
+	for _, name := range []string{".bashrc", ".zshrc"} {
+		if err := os.WriteFile(filepath.Join(home, name), []byte("PS1='OLD_JOB_PROMPT> '\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	job := f.submit(t, "/bin/sh", "-c", "echo OLD_JOB_STILL_LIVE; sleep 30")
 	window := f.window(t, job.ID)
 	f.waitForTerminal(t, window, "OLD_JOB_STILL_LIVE")
@@ -209,7 +215,13 @@ func TestRestartRequiresHumanToStopLiveTaggedJobPane(t *testing.T) {
 		t.Fatal("restart killed or adopted old helper")
 	}
 	f.tmux(t, "send-keys", "-t", helperPane, "C-c")
-	f.waitDead(t, helperPane)
+	f.waitForTerminal(t, window, "cancelled, exit 130")
+	// A footer/result can precede actual process exit (notably race-runtime
+	// teardown). The real shell prompt confirms the foreground helper returned.
+	f.waitForShellPrompt(t, window, "OLD_JOB_PROMPT>")
+	if dead := f.tmux(t, "display-message", "-p", "-t", helperPane, "#{pane_dead}"); dead != "0" {
+		t.Fatal("stopping the old job must return to its live shell")
+	}
 	time.Sleep(400 * time.Millisecond)
 	f.restartRunner(t)
 	next := f.submit(t, "/bin/echo", "HUMAN_STOP_CONFIRMED")

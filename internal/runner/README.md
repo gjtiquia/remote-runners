@@ -32,16 +32,18 @@ Paths should be absolute. There is no application authentication or sandbox.
 
 Run in one **dedicated** tmux session, with no unrelated windows. Startup verifies
 `TMUX`, `TMUX_PANE`, session ID, and runner window ID through `display-message`.
-Use a current tmux supporting argv-style `new-window`/`respawn-pane` and
-synchronous `if-shell -F` guards (tested with tmux 3.5a). Commands launch through explicit
-`/bin/sh`, not a login shell. Terminal inspection/mutation calls have deadlines.
+Use a current tmux supporting argv-style `new-window`, explicit `-e` environment
+overrides, and synchronous `if-shell -F` guards (tested with tmux 3.5a). Job shells
+use this session's effective `default-shell`: Zsh with its standard `zsh/parameter`
+module, or Bash 5.1+. The older macOS system Bash is unsupported. Terminal
+inspection/mutation calls have deadlines.
 
 ## Job execution
 
 A worker-owned window is reused per shared `repository.Identity(Remote)` plus
 exact branch; remote aliases for the same worktree share a window. Only completed
-windows may be respawned/evicted. At the limit, the least-recently-used idle window
-is removed. Active windows and the runner window are protected; worktrees are
+windows with a verified idle shell may be reused/evicted. At the limit, the
+least-recently-used idle window is removed. Active windows and the runner window are protected; worktrees are
 not deleted. Advertised slots are `min(max_jobs, max_windows) - active`, with
 preparation and hooks counted active. An assignment without local capacity
 returns `ErrNoCapacity` **before execution** and sends `decline` with job ID,
@@ -50,33 +52,68 @@ Heartbeat and completion capacity sampling is serialized with wire emission so
 older snapshots cannot overtake newer completion reports. Preparation, hook,
 command, and infrastructure failures remain terminal, never retries.
 
-Each owned window carries `@remote-runner-window` versioned retention metadata:
-a base64-serialized normalized source/branch key, exact window and helper pane
-IDs, and last-use timestamp. A newly created/respawned shell waits on a private
-launch gate. Only its parent can release that gate, after setting and confirming
-the exact window/pane metadata; the shell never tags or releases itself. A parent
-crash before tagging cannot start a hidden job. Startup rejects **all untagged
-non-runner windows**, including pending launches, with a manual stop/close
-instruction. It never adopts or automatically releases a pending launch.
+### Persistent shell and admission
 
-Startup loads only tagged, positively completed helper panes. Before connecting,
-it evicts least-recently-used completed windows until the current `max_windows`
-budget is met, including when that limit was reduced since the previous run.
-Unsafe or uncertain cleanup rejects registration instead of exceeding the limit.
-Eviction uses tmux's synchronous `if-shell -F` guard for the exact dead helper,
-its window/session, and a one-pane window, followed by `kill-pane`, never
-`kill-window`. A failed/refused eviction does not release window accounting.
-Malformed tags, missing helper panes, or extra inspection/user panes in an owned
-window require manual attention; no user-owned pane is destroyed to reclaim a
-window. Inspection panes may still be used during execution, but must be closed
-manually before reuse/restart.
+Each new window launches a real interactive **non-login** shell, not a helper
+pane. Private startup wrappers/prompt hooks under its private job directory load
+normal Zsh `.zshenv`/`.zshrc` (respecting `ZDOTDIR`) or Bash `.bashrc`; no user
+dotfiles are edited. Your real prompt remains visible. Hooks preserve existing
+prompt behavior while recording busy/idle state. Bash requires `promptvars` and
+supported `PROMPT_COMMAND`; unsupported or altered hooks fail closed.
 
-The same executable's private `job-exec DESCRIPTOR_PATH` command runs as the
-actual foreground program in each job pane. `JobDescriptor` is the JSON contract
-for this subprocess (roots, protocol job, environment, output/result/cancel
-paths). `JobExec(path)` is also exported for integration use; ordinary applications
-should use `Run`. The helper removes its descriptor after reading it because it
-contains the launching runner's environment and potentially credentials.
+The worker's baseline environment keys are explicit tmux `new-window -e`
+overrides, except pane-owned `TMUX`, `TMUX_PANE`, and `TERM`. Ordinary tmux global
+variables may also exist in the baseline: this is not strict environment isolation.
+Normal startup exports and later manual exports define the actual pane environment.
+The helper inherits that environment rather than a descriptor environment snapshot.
+
+After confirming window ownership, the runner sends a quoted private
+`job-exec DESCRIPTOR_PATH` invocation plus Enter. The helper receives structured
+JSON arguments and uses Go `exec.CommandContext` directly: no interpolation of
+submitted arguments and no shell alias/function support as job executables.
+The private helper CLI returns the recorded command status, so native foreground
+job control also preserves it. The shell wrapper returns to the prepared worktree
+root; Bash prompt restoration also handles a helper suspended and later resumed
+with `fg`, without replacing the user's `fg` builtin. Repeated jobs reuse the same window, pane,
+and shell; there is no helper-pane death/respawn lifecycle or delayed launch gate.
+Startup alone never launches a helper, even after a parent crash.
+
+Leave an **untouched primary prompt**, and never type concurrently with submission.
+Manual foreground commands (including builtins), running or stopped background
+jobs, or an active helper refuse admission immediately: job `failed`, exit 125,
+`worktree window is busy`. No manual-busy wait, requeue, or cancellation input is
+injected. A newly created shell alone may wait up to ten seconds for startup.
+Half-typed text and continuation prompts cannot be detected externally; a prompt
+marker is not a keyboard lock. Copy mode, extra panes, a replaced shell, and
+invalid hook state are rejected fail closed. After a background job completes,
+press Enter to refresh prompt state if needed.
+
+### Retention and helper identity
+
+`@remote-runner-window` version 2 is UI-only metadata: a base64-serialized normalized
+source/branch key, shell nonce, exact window/pane IDs, and last-use timestamp. It
+contains no job IDs, result paths, execution descriptors, or job history. Reuse
+requires the owned prompt nonce, shell PID matching `pane_pid`, no active helper,
+and the original single live pane outside copy mode. Admission and eviction
+recheck these guards inside tmux's command queue. Eviction targets only the exact
+idle pane with `kill-pane`, never the whole window with `kill-window`.
+
+Startup accepts tagged **live idle shells**, but rejects running old helpers,
+manual applications, untagged windows, malformed identities, replaced/dead shells,
+and extra panes. Close inspection panes before reuse/restart. Before connecting,
+startup trims verified idle windows to the current `max_windows` budget, including
+a reduced limit. Refused/uncertain eviction keeps accounting and blocks unsafe
+registration; no user-owned pane is destroyed to reclaim a window.
+
+**Version 1 upgrade:** stop old jobs and manually close completed legacy
+(dead-helper) job windows before starting the updated runner. They are never
+force-killed or adopted.
+
+`JobDescriptor` is the private helper's JSON contract: roots, protocol job,
+output/result/cancel paths, helper PID, shell-return marker, and shell-result
+script paths. `JobExec(path)` is exported for integration use; ordinary applications
+should use `Run`. The helper removes the consumed descriptor because arguments
+may contain secrets.
 
 Preparation uses `workspace.Prepare(ctx, Roots, Source, writer)`; workspace owns
 cross-process repository locking and cancellable Git process groups. The helper
@@ -93,13 +130,13 @@ project-root `.remote-runner.json` hook fields use these literal names:
 Commit this configuration; untracked hook files left by previous jobs are ignored.
 The internal committed-file Git check excludes Git routing variables (such as
 `GIT_DIR` and `GIT_WORK_TREE`), matching workspace preparation. Hooks and submitted
-commands deliberately retain those variables and the rest of the worker environment.
+commands deliberately retain those variables and the rest of the pane environment.
 Hooks execute through `/bin/sh -c`; after-create runs
 only for a newly created worktree, before-job runs every time, and hook failure
 prevents the command. Job executable/arguments execute directly without shell
-interpolation. All phases inherit the launching runner's environment, **not**
-the tmux server's stale environment; only `TMUX` and `TMUX_PANE` reflect the new
-job pane. Execution starts at the worktree root. Timeout defaults to 30 minutes
+interpolation. Preparation, hooks, and commands inherit the persistent shell's
+actual pane environment, including startup/manual exports. Execution starts at
+the prepared worktree root. Timeout defaults to 30 minutes
 and includes Git preparation and hooks.
 
 SIGINT (human Ctrl-C), SIGTERM, and SIGHUP cancel the helper's context; a runner
@@ -144,42 +181,55 @@ Output is tee'd to disk and the tmux terminal, never accumulated wholesale by th
 worker. After completion the parent reads <=32 KiB chunks into `output` messages,
 then sends `complete` (state, exit code, error, resolved commit, fresh runner
 capacity). Result files are published by atomic rename. Completion waits for the
-helper's exact stable pane ID to be dead before reading its result or making its
-window reusable. Selecting an inspection pane does not
-make an active job appear completed. Disk errors fail results; helper startup failures remain
-visible in the pane even when result/output files cannot be created.
+helper's recorded process PID to have exited and the shell-return marker to exist
+before reading its result (with conservative handling for initialization failure
+or pane death). A prompt, result file, or shell-return marker alone is insufficient:
+a stopped helper is still alive. The current worker can clear a stopped helper's
+active lease after `fg` and observed exit. Selecting an inspection pane never
+proves completion. Disk errors fail results; helper startup failures remain
+visible even when result/output files cannot be created.
 
 Private job directories live under `<worktrees>/.remote-runner-jobs/job-*`, with
-0600 files and 0700 directories. Output, result, and cancellation files are retained
-for manual diagnosis; there is no automatic age cleanup or output size cap. Ensure
-adequate disk space and remove completed job directories manually when no longer
-needed. Evicting a window does not delete these files or its worktree.
+0600 files and 0700 directories, including generated shell startup files and
+prompt hooks. Output, result, and cancellation files remain for manual diagnosis;
+there is no automatic age cleanup or output size cap. Keep job directories while
+the associated window exists; manually delete them **only after closing that
+window**. Eviction does not delete these files or the worktree. Ensure adequate
+disk space.
 
 There is no reconnection, reconciliation, orphan adoption, or execution/occupancy
 recovery. Window retention metadata is UI bookkeeping only: it contains no job
 IDs, result paths, or execution descriptors, and never restores jobs or results.
 Broken transport leaves job helpers running independently and late output is
 discarded; retained files do not imply recoverable coordinator state. Before
-manual registration/restart, Ctrl-C all old job panes, confirm their completion,
-and stop the old runner. Startup rejects any still-live tagged helper with an
-explicit Ctrl-C/wait instruction; it neither adopts nor kills that execution.
-If tmux cannot be queried, the worker conservatively does not treat an unconfirmed
-active window as idle/evictable.
+manual registration/restart, stop old jobs/manual applications, confirm process
+exit, and stop the old runner. Leave retained shells at untouched primary prompts
+without extra panes or copy mode. Startup rejects an active old helper; it neither
+adopts nor kills that execution. Suspended helpers must really exit before reuse;
+prompt restoration handles the prepared root/status after `fg`. If identity or
+completion cannot be confirmed, close the window manually. There is no orphan
+recovery. If tmux cannot be queried, an unconfirmed window is not idle/evictable.
 
 ## Integration coverage
 
 Tests use real loopback coordinator/client networking, temporary Git repositories,
 subprocesses, and separate test-owned tmux sockets. They cover starter config,
 configuration validation, job args/environment/root/commit, committed hook lifecycle,
-untracked-hook rejection, real job panes,
-Ctrl-C and descendant cancellation, management cancellation, hook failure/timeout,
-normalized alias reuse, eight-window retention and reduced-budget trimming across
-same-session restarts, live-job and pending/untagged restart rejection,
-interrupted launch gating, inspection panes added between eviction checks and
-mutation, failed-eviction accounting, protected-pane cleanup rejection, admission
-declines/fresh completion capacity, inherited Git routing with committed hooks,
-window LRU/active protection, output chunk transfer and exit status, and
-local-job survival after coordinator disconnection. macOS cross-compilation is
-not runtime validation. Memory-measurement error injection, disk exhaustion,
-heartbeat transport stalls, and abrupt externally destroyed tmux windows are not
-currently integration-tested.
+untracked-hook rejection, persistent Bash/Zsh prompts and shell identity,
+startup/manual exports, prompt status and hooks, busy foreground/builtin and
+background-job refusal, stopped helpers, copy mode and replaced-shell rejection,
+Ctrl-C/descendant and management cancellation, hook failure/timeout, normalized
+alias reuse, eight-window retention and reduced-budget restart trimming, live-job
+and untagged restart rejection, guarded eviction with extra inspection panes,
+failed-eviction accounting, admission declines/fresh capacity, inherited Git
+routing with committed hooks, output chunks/status, and local-job survival after
+disconnection.
+
+`go test -race` uses race-build-tag fixtures to instrument the actual worker/helper
+subprocesses as well as the harness; it requires CGO and a C compiler. Regular
+builds require neither. Zsh tests use `zsh` on `PATH` when available; optionally
+set `REMOTE_RUNNERS_TEST_ZSH` to a custom executable and
+`REMOTE_RUNNERS_TEST_ZSH_MODULE_PATH` to its module directory for a privately
+extracted Zsh. macOS cross-compilation is not actual runtime validation.
+Memory-measurement error injection, disk exhaustion, heartbeat transport stalls,
+and abrupt externally destroyed tmux windows are not currently integration-tested.

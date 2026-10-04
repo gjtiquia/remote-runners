@@ -12,11 +12,12 @@ import (
 // Main is the worker command entrypoint; job-exec is a private subprocess protocol.
 func Main(args []string) int {
 	if len(args) == 2 && args[0] == "job-exec" {
-		if err := JobExec(args[1]); err != nil {
+		code, err := executeJob(args[1])
+		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		return 0
+		return code
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

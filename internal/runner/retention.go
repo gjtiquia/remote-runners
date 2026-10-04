@@ -16,11 +16,12 @@ const windowMetadataOption = "@remote-runner-window"
 // Retention metadata identifies UI resources only. It deliberately contains no
 // job IDs, result paths, execution state, or recoverable execution descriptors.
 type windowMetadata struct {
-	Version int    `json:"version"`
-	Key     string `json:"key"`
-	Window  string `json:"window"`
-	Pane    string `json:"pane"`
-	Used    int64  `json:"used"`
+	Version    int    `json:"version"`
+	Key        string `json:"key"`
+	Window     string `json:"window"`
+	Pane       string `json:"pane"`
+	ShellToken string `json:"shell_token"`
+	Used       int64  `json:"used"`
 }
 
 func (t terminal) output(args ...string) ([]byte, error) {
@@ -29,11 +30,11 @@ func (t terminal) output(args ...string) ([]byte, error) {
 	return t.command(ctx, args...).CombinedOutput()
 }
 
-// The parent writes and confirms metadata before releasing the launch gate.
-// The waiting shell never tags itself or releases itself after a parent crash.
+// The parent confirms UI ownership before sending a command to the shell.
+// Startup alone never launches a helper, even after a parent crash.
 func (t terminal) tagWindow(key protocol.Source, window *jobWindow) error {
 	data, _ := json.Marshal(key)
-	metadata, _ := json.Marshal(windowMetadata{Version: 1, Key: base64.RawURLEncoding.EncodeToString(data), Window: window.id, Pane: window.pane, Used: window.used.UnixNano()})
+	metadata, _ := json.Marshal(windowMetadata{Version: 2, Key: base64.RawURLEncoding.EncodeToString(data), Window: window.id, Pane: window.pane, ShellToken: window.shellToken, Used: window.used.UnixNano()})
 	out, err := t.output("set-option", "-w", "-t", window.pane, "remain-on-exit", "on", ";", "set-option", "-w", "-t", window.pane, windowMetadataOption, string(metadata))
 	if err != nil {
 		return fmt.Errorf("tag job window: %w: %s", err, out)
@@ -55,14 +56,17 @@ func parseWindowMetadata(raw, id string) (protocol.Source, *jobWindow, error) {
 	if err != nil {
 		return key, nil, fmt.Errorf("invalid retention key in window %s", id)
 	}
-	if err = json.Unmarshal(data, &key); err != nil || metadata.Version != 1 || metadata.Window != id || len(metadata.Pane) < 2 || metadata.Pane[0] != '%' || strings.Trim(metadata.Pane[1:], "0123456789") != "" || key.Remote == "" || key.Branch == "" || metadata.Used <= 0 {
+	if metadata.Version == 1 {
+		return key, nil, fmt.Errorf("legacy helper window %s: stop old jobs and close completed job windows before starting this interactive-shell runner", id)
+	}
+	if err = json.Unmarshal(data, &key); err != nil || metadata.Version != 2 || metadata.Window != id || len(metadata.Pane) < 2 || metadata.Pane[0] != '%' || strings.Trim(metadata.Pane[1:], "0123456789") != "" || key.Remote == "" || key.Branch == "" || metadata.Used <= 0 || metadata.ShellToken == "" || strings.Trim(metadata.ShellToken, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") != "" {
 		return key, nil, fmt.Errorf("invalid retention identity in window %s; inspect its metadata manually", id)
 	}
-	return key, &jobWindow{id: id, pane: metadata.Pane, used: time.Unix(0, metadata.Used)}, nil
+	return key, &jobWindow{id: id, pane: metadata.Pane, shellToken: metadata.ShellToken, used: time.Unix(0, metadata.Used)}, nil
 }
 
-// Only a tagged, exact, dead helper pane can be retained. Extra inspection panes
-// are never killed by respawn/eviction; the operator must close them first.
+// Only an identified shell at its primary prompt can be reused or evicted.
+// Manual commands and extra inspection panes are never interrupted.
 func (t terminal) completedWindow(window *jobWindow) error {
 	out, err := t.output("list-panes", "-t", window.id, "-F", "#{pane_id}\t#{pane_dead}")
 	if err != nil {
@@ -74,8 +78,8 @@ func (t terminal) completedWindow(window *jobWindow) error {
 		fields := strings.Split(line, "\t")
 		if len(fields) == 2 && fields[0] == window.pane {
 			found = true
-			if fields[1] != "1" {
-				return fmt.Errorf("job pane %s in window %s is still live: Ctrl-C the old job and wait for it to exit before restarting the runner", window.pane, window.id)
+			if fields[1] != "0" {
+				return fmt.Errorf("job shell %s in window %s has exited; close this window manually before restarting", window.pane, window.id)
 			}
 		}
 	}
@@ -84,6 +88,9 @@ func (t terminal) completedWindow(window *jobWindow) error {
 	}
 	if len(lines) != 1 {
 		return fmt.Errorf("retained window %s contains extra inspection/user panes; close those panes manually before reuse or restart", window.id)
+	}
+	if err := t.shellIdle(window); err != nil {
+		return fmt.Errorf("%w: Ctrl-C the old job/manual command and leave its shell at the prompt before restarting", err)
 	}
 	return nil
 }
@@ -143,8 +150,8 @@ func (t terminal) trimRetainedWindows(windows map[protocol.Source]*jobWindow, li
 }
 
 // Evaluate the destructive preconditions inside tmux's command queue, not in a
-// stale client-side snapshot. Never target a whole window: the stable dead helper
-// pane is the only resource we own. A refused/uncertain eviction keeps accounting.
+// stale client-side snapshot. Only the stable idle job shell is owned; never
+// target a whole window. A refused/uncertain eviction keeps accounting.
 func (t terminal) evictCompletedWindow(key protocol.Source, window *jobWindow) error {
 	if window.active || window.id == t.window {
 		return fmt.Errorf("refusing to evict active or runner window %s", window.id)
@@ -152,7 +159,7 @@ func (t terminal) evictCompletedWindow(key protocol.Source, window *jobWindow) e
 	if err := t.verifyCompletedWindow(key, window); err != nil {
 		return err
 	}
-	guard := "#{&&:#{pane_dead},#{&&:#{==:#{window_id}," + window.id + "},#{&&:#{==:#{session_id}," + t.session + "},#{==:#{window_panes},1}}}}"
+	guard := t.shellIdleGuard(window)
 	out, err := t.output("if-shell", "-F", "-t", window.pane, guard,
 		"kill-pane -t "+window.pane+" ; display-message -p remote-runner-evicted",
 		"display-message -p remote-runner-retained")

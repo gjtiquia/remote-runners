@@ -29,10 +29,9 @@ func TestJobExecKeepsProgressOnStderrAndOutOfStdoutPayload(t *testing.T) {
 			Source: protocol.Source{Remote: repository(t, ""), Branch: "main"},
 			Args:   []string{executable, "-c", `echo STDOUT_PAYLOAD; echo STDERR_PAYLOAD >&2; : "$1"`, "command", "PRIVATE_ARGUMENT"},
 		}},
-		Environment: append(os.Environ(), "PRIVATE_ENVIRONMENT=ENVIRONMENT_SECRET"),
-		OutputPath:  filepath.Join(base, "output"),
-		ResultPath:  filepath.Join(base, "result"),
-		CancelPath:  filepath.Join(base, "cancel"),
+		OutputPath: filepath.Join(base, "output"),
+		ResultPath: filepath.Join(base, "result"),
+		CancelPath: filepath.Join(base, "cancel"),
 	}
 	data, err := json.Marshal(d)
 	if err != nil {
@@ -44,6 +43,7 @@ func TestJobExecKeepsProgressOnStderrAndOutOfStdoutPayload(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	command := exec.Command(bin, "job-exec", descriptor)
+	command.Env = append(os.Environ(), "PRIVATE_ENVIRONMENT=ENVIRONMENT_SECRET")
 	command.Stdout, command.Stderr = &stdout, &stderr
 	if err = command.Run(); err != nil {
 		t.Fatalf("helper: %v\n%s\n%s", err, &stdout, &stderr)

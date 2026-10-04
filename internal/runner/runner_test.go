@@ -20,7 +20,12 @@ import (
 func binary(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "remote-runner")
-	c := exec.Command("go", "build", "-p", "1", "-o", path, "../../cmd/remote-runner")
+	args := []string{"build", "-p", "1"}
+	if raceEnabled {
+		args = append(args, "-race")
+	}
+	args = append(args, "-o", path, "../../cmd/remote-runner")
+	c := exec.Command("go", args...)
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
@@ -55,13 +60,14 @@ func repository(t *testing.T, hooks string) string {
 
 func helper(t *testing.T, bin, source, base string, args []string, env []string) (map[string]any, string) {
 	t.Helper()
-	descriptor := map[string]any{"roots": map[string]string{"Repos": filepath.Join(base, "repos"), "Worktrees": filepath.Join(base, "worktrees")}, "job": map[string]any{"id": "test", "source": map[string]string{"remote": source, "branch": "main"}, "args": args, "timeout": int64(10000000000)}, "environment": env, "output_path": filepath.Join(base, "output"), "result_path": filepath.Join(base, "result"), "cancel_path": filepath.Join(base, "cancel")}
+	descriptor := map[string]any{"roots": map[string]string{"Repos": filepath.Join(base, "repos"), "Worktrees": filepath.Join(base, "worktrees")}, "job": map[string]any{"id": "test", "source": map[string]string{"remote": source, "branch": "main"}, "args": args, "timeout": int64(10000000000)}, "output_path": filepath.Join(base, "output"), "result_path": filepath.Join(base, "result"), "cancel_path": filepath.Join(base, "cancel")}
 	data, _ := json.Marshal(descriptor)
 	path := filepath.Join(base, "descriptor.json")
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	c := exec.Command(bin, "job-exec", path)
+	c.Env = env
 	var stdout, stderr bytes.Buffer
 	c.Stdout, c.Stderr = &stdout, &stderr
 	err := c.Run()
@@ -133,7 +139,7 @@ func startRunnerWithEnvironment(t *testing.T, maxWindows int, environment []stri
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	server, err := coordinator.New(coordinator.Options{OutputDir: dir, HeartbeatInterval: 100 * time.Millisecond})
+	server, err := coordinator.New(coordinator.Options{OutputDir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}

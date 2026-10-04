@@ -18,49 +18,51 @@ import (
 )
 
 // JobDescriptor is the private job-exec CLI input. Paths must be runner-owned.
-// Environment is captured from the runner, not inherited from the tmux server.
+// Environment is inherited from the persistent interactive job shell.
 type JobDescriptor struct {
-	Roots       workspace.Roots `json:"roots"`
-	Job         protocol.Job    `json:"job"`
-	Environment []string        `json:"environment"`
-	OutputPath  string          `json:"output_path"`
-	ResultPath  string          `json:"result_path"`
-	CancelPath  string          `json:"cancel_path"`
+	Roots           workspace.Roots `json:"roots"`
+	Job             protocol.Job    `json:"job"`
+	OutputPath      string          `json:"output_path"`
+	ResultPath      string          `json:"result_path"`
+	CancelPath      string          `json:"cancel_path"`
+	ProcessPath     string          `json:"process_path,omitempty"`
+	ReturnedPath    string          `json:"returned_path,omitempty"`
+	ShellScriptPath string          `json:"shell_script_path,omitempty"`
 }
 
 // JobExec runs the descriptor in the foreground of its terminal. Completion is
 // atomic at ResultPath; command failure is a result, not helper infrastructure failure.
 func JobExec(path string) error {
+	_, err := executeJob(path)
+	return err
+}
+
+// The private CLI also returns the command status to its interactive shell. This
+// makes ordinary fg preserve that status without replacing the user's fg builtin.
+func executeJob(path string) (int, error) {
+	// Publish identity before parsing/preparation, including infrastructure-failure
+	// paths. The interactive shell remains alive, so pane death is no longer proof
+	// of helper completion. A stopped helper retains this live PID.
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "helper.pid"), []byte(fmt.Sprint(os.Getpid())), 0600); err != nil {
+		return 125, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return 125, err
 	}
 	var d JobDescriptor
 	if err = json.Unmarshal(data, &d); err != nil {
-		return err
+		return 125, err
 	}
-	// The descriptor contains the inherited environment and may contain secrets.
+	// Arguments may contain secrets; remove the consumed private descriptor.
 	if err = os.Remove(path); err != nil {
-		return err
+		return 125, err
 	}
-	// Only terminal identity belongs to the new job pane. All tool/user variables
-	// come from the launching runner, never the tmux server's stale environment.
-	tmux, pane := os.Getenv("TMUX"), os.Getenv("TMUX_PANE")
-	os.Clearenv()
-	for _, entry := range d.Environment {
-		if k, v, ok := strings.Cut(entry, "="); ok {
-			_ = os.Setenv(k, v)
-		}
-	}
-	if tmux != "" {
-		_ = os.Setenv("TMUX", tmux)
-	}
-	if pane != "" {
-		_ = os.Setenv("TMUX_PANE", pane)
-	}
+	// Keep the shell's startup exports and subsequent manual exports intact.
+	pane := os.Getenv("TMUX_PANE")
 	output, err := os.OpenFile(d.OutputPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
-		return err
+		return 125, err
 	}
 	defer output.Close()
 	// Progress goes only to terminal stderr, never through the payload tee.
@@ -134,14 +136,23 @@ func JobExec(path string) error {
 		result.Error = "output close: " + e.Error()
 	}
 	progress("completed state=%q exit=%d commit=%q", result.State, code, result.Commit)
+	if d.ShellScriptPath != "" {
+		script := fmt.Sprintf("__rr_job_status=%d\n", code)
+		if prepared.Root != "" {
+			script = "builtin cd -- " + quote(prepared.Root) + "\n" + script
+		}
+		if err = os.WriteFile(d.ShellScriptPath, []byte(script), 0600); err != nil {
+			return 125, fmt.Errorf("return worktree/status to shell: %w", err)
+		}
+	}
 	data, err = json.Marshal(result)
 	if err != nil {
-		return err
+		return 125, err
 	}
 	if err = os.WriteFile(d.ResultPath+".tmp", data, 0600); err != nil {
-		return err
+		return 125, err
 	}
-	return os.Rename(d.ResultPath+".tmp", d.ResultPath)
+	return code, os.Rename(d.ResultPath+".tmp", d.ResultPath)
 }
 
 // Hook configuration is committed at the worktree root as .remote-runner.json.
