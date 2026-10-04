@@ -1,5 +1,26 @@
 # Coordinator/client contract
 
+## Build identity
+
+Go embeds VCS revision and modified-state metadata automatically; the install
+command `go install ./cmd/...` remains unchanged. Thin clients and workers report
+build metadata only and do not enforce compatibility locally. The coordinator is
+the sole authority: before accepting work, it rejects peers whose build identity is
+unknown, whose build is dirty, or whose identity does not match the coordinator.
+Rejections are clear in server logs and in errors returned to the peer. Installing
+an upgrade is not sufficient by itself: reinstall and restart the relevant
+binaries. A dirty checkout must be committed or rebuilt from a clean checkout
+before installation. A dirty or unknown coordinator build refuses to start.
+
+Management requests and worker WebSocket handshakes report
+`X-Remote-Runners-Revision` and `X-Remote-Runners-Modified` headers. The coordinator
+checks the complete Git revision and requires a known clean build; missing,
+malformed, dirty, or mismatched identities receive HTTP 412 before request handling
+or WebSocket upgrade. Clients simply surface that response. These headers are
+trusted identity reports, not authentication or cryptographic build attestation.
+`Options.Build` and `Client.Build` allow explicit identity injection for embedded
+hosts and deterministic tests; normal executables use their own build metadata.
+
 `coordinator.New(Options)` creates an in-memory coordinator; serve `Handler()` with
 an ordinary HTTP server. `Close()` is idempotent: stops its ticker and WebSockets,
 closes spool files, and removes only its fresh owned temporary output directory.
@@ -38,7 +59,8 @@ network-facing and explicitly trusted, without application authentication.
 
 Errors are HTTP 400 (invalid input), 403 (non-loopback management), 404 (unknown
 route/job), 405 (wrong method, with Allow), 409 (output not completed), 413
-(oversized submission), 500 (spool infrastructure failure), or 503 (closed).
+(oversized submission), 412 (build identity rejected), 500 (spool infrastructure
+failure), or 503 (closed).
 Submissions must be one JSON object, reject unknown fields, and fit 64 KiB.
 Executable/source are required; arguments cannot contain NUL; branch names obey
 Git ref naming rules. Zero timeout defaults to 30 minutes, negative is rejected.

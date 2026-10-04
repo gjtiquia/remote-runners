@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gjtiquia/remote-runners/internal/protocol"
+	"github.com/gjtiquia/remote-runners/internal/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -72,7 +73,7 @@ func TestServerAcceptsNetworkRunnerButRejectsRemoteManagementAndAppliesHeartbeat
 		}
 	}
 	dialer := websocket.Dialer{HandshakeTimeout: time.Second}
-	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(base, "http")+"/runner", nil)
+	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(base, "http")+"/runner", testutil.Headers())
 	if err != nil {
 		t.Fatal(err)
 	}

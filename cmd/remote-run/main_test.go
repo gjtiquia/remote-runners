@@ -18,31 +18,30 @@ import (
 	"github.com/gjtiquia/remote-runners/internal/client"
 	"github.com/gjtiquia/remote-runners/internal/coordinator"
 	"github.com/gjtiquia/remote-runners/internal/runner"
+	"github.com/gjtiquia/remote-runners/internal/testutil"
 )
 
-// Re-execute the actual command entrypoint, not an internal argument parser.
-func TestCLIEntrypoint(t *testing.T) {
-	if os.Getenv("REMOTE_RUN_CLI_HELPER") != "1" {
-		return
+var cliBinary string
+
+// Exercise a real command binary: Go test binaries may lack VCS metadata.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "remote-run-cli-test-")
+	if err != nil {
+		panic(err)
 	}
-	for i, a := range os.Args {
-		if a == "--" {
-			os.Args = append([]string{"remote-run"}, os.Args[i+1:]...)
-			main()
-			return
-		}
+	cliBinary = filepath.Join(dir, "remote-run")
+	if out, err := exec.Command("go", "build", "-p", "1", "-o", cliBinary, ".").CombinedOutput(); err != nil {
+		os.RemoveAll(dir)
+		panic(string(out) + err.Error())
 	}
-	os.Exit(99)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 func command(t *testing.T, dir string, args ...string) *exec.Cmd {
 	t.Helper()
-	bin, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := exec.Command(bin, append([]string{"-test.run=^TestCLIEntrypoint$", "--"}, args...)...)
-	c.Env = append(os.Environ(), "REMOTE_RUN_CLI_HELPER=1")
+	c := exec.Command(cliBinary, args...)
 	c.Dir = dir
 	return c
 }
@@ -99,14 +98,14 @@ func startCoordinator(t *testing.T) fixture {
 	t.Helper()
 	// These exercise CLI behaviour, not heartbeat cutoff. Use production timing
 	// so instrumented large-output transfers don't cause artificial runner loss.
-	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir()})
+	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), Build: testutil.PtrBuild()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	h := httptest.NewServer(s.Handler())
 	t.Cleanup(h.Close)
-	return fixture{api: client.New(h.URL), port: strings.TrimPrefix(h.URL, "http://127.0.0.1:")}
+	return fixture{api: testutil.Client(h.URL), port: strings.TrimPrefix(h.URL, "http://127.0.0.1:")}
 }
 func startWorker(t *testing.T, f fixture) fixture {
 	t.Helper()

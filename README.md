@@ -22,6 +22,15 @@ go install ./cmd/...
 
 These remote install commands require the implementation to be pushed/released;
 `@latest` follows Go version selection, not necessarily the newest main commit.
+`go install ./cmd/...` is unchanged: Go embeds VCS revision and modified-state
+metadata automatically. Clients and workers report that build metadata; only the
+coordinator enforces build identity, rejecting unknown, dirty, or mismatched builds
+before doing work. Rejection is logged by the server and reported to the peer.
+Upgrading requires reinstalling and restarting the relevant binaries. For a dirty
+checkout, commit the changes or rebuild from a clean checkout before installing.
+The coordinator also refuses to start from a dirty or unknown build. For this
+workflow, install from a clean Git checkout: remote module installs (`@latest`,
+`@main`, or `@SHA`) may lack the required VCS metadata and be rejected.
 Binaries go to `GOBIN`, or usually `~/go/bin`; add that directory to `PATH`.
 Go is not required to run built binaries. Workers need Git, tmux (tested on 3.5a),
 SSH/repository access, and project tools such as Bun and browsers. The dedicated

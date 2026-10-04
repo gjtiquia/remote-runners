@@ -16,6 +16,7 @@ import (
 	"github.com/gjtiquia/remote-runners/internal/client"
 	"github.com/gjtiquia/remote-runners/internal/coordinator"
 	"github.com/gjtiquia/remote-runners/internal/protocol"
+	"github.com/gjtiquia/remote-runners/internal/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -30,7 +31,7 @@ func buildUtils(t *testing.T) string {
 
 func startCoordinator(t *testing.T) (*client.Client, string, string) {
 	t.Helper()
-	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: time.Hour})
+	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: time.Hour, Build: testutil.PtrBuild()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +50,7 @@ func startCoordinator(t *testing.T) (*client.Client, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return client.New(h.URL), port, h.URL
+	return testutil.Client(h.URL), port, h.URL
 }
 
 func runUtils(t *testing.T, binary string, args ...string) (stdout, stderr string, code int) {
@@ -86,7 +87,7 @@ func submit(t *testing.T, c *client.Client) protocol.Job {
 
 func registerRunner(t *testing.T, base string) (*websocket.Conn, string) {
 	t.Helper()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(base, "http")+"/runner", nil)
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(base, "http")+"/runner", testutil.Headers())
 	if err != nil {
 		t.Fatal(err)
 	}

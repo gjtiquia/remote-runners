@@ -15,6 +15,7 @@ import (
 
 	"github.com/gjtiquia/remote-runners/internal/client"
 	"github.com/gjtiquia/remote-runners/internal/protocol"
+	"github.com/gjtiquia/remote-runners/internal/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -74,7 +75,7 @@ func startServer(t *testing.T, binary string, port int, args ...string) (*server
 			}
 		}
 	})
-	c := client.New(fmt.Sprintf("http://127.0.0.1:%d", port))
+	c := testutil.Client(fmt.Sprintf("http://127.0.0.1:%d", port))
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -140,7 +141,7 @@ func TestServerServesCoordinatorAndGracefullyClosesOnSIGTERM(t *testing.T) {
 	}
 	port := freePort(t)
 	process, c := startServer(t, binary, port)
-	conn, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://127.0.0.1:%d/runner", port), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://127.0.0.1:%d/runner", port), testutil.Headers())
 	if err != nil {
 		t.Fatal(err)
 	}

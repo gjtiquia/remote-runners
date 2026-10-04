@@ -11,16 +11,19 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/gjtiquia/remote-runners/internal/buildinfo"
 	"github.com/gjtiquia/remote-runners/internal/protocol"
 )
 
 type Client struct {
+	// Build is the reported binary identity, not a client-side compatibility policy.
+	Build   buildinfo.Info
 	baseURL string
 	http    *http.Client
 }
 
 func New(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{}}
+	return &Client{Build: buildinfo.Current(), baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{}}
 }
 func (c *Client) request(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var r io.Reader
@@ -35,6 +38,7 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (*h
 	if err != nil {
 		return nil, err
 	}
+	buildinfo.SetHeaders(req.Header, c.Build)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

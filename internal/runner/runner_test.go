@@ -8,6 +8,7 @@ import (
 	"github.com/gjtiquia/remote-runners/internal/client"
 	"github.com/gjtiquia/remote-runners/internal/coordinator"
 	"github.com/gjtiquia/remote-runners/internal/protocol"
+	"github.com/gjtiquia/remote-runners/internal/testutil"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -139,7 +140,7 @@ func startRunnerWithEnvironment(t *testing.T, maxWindows int, environment []stri
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	server, err := coordinator.New(coordinator.Options{OutputDir: dir})
+	server, err := coordinator.New(coordinator.Options{OutputDir: dir, Build: testutil.PtrBuild()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +167,7 @@ func startRunnerWithEnvironment(t *testing.T, maxWindows int, environment []stri
 	if err != nil {
 		t.Fatalf("tmux session: %v %s", err, out)
 	}
-	api := client.New(httpServer.URL)
+	api := testutil.Client(httpServer.URL)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		runners, err := api.Runners(context.Background())

@@ -17,11 +17,12 @@ import (
 	"github.com/gjtiquia/remote-runners/internal/client"
 	"github.com/gjtiquia/remote-runners/internal/coordinator"
 	"github.com/gjtiquia/remote-runners/internal/protocol"
+	"github.com/gjtiquia/remote-runners/internal/testutil"
 )
 
 func start(t *testing.T) (*coordinator.Server, *client.Client, string) {
 	t.Helper()
-	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: time.Hour})
+	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: time.Hour, Build: testutil.PtrBuild()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +33,7 @@ func start(t *testing.T) (*coordinator.Server, *client.Client, string) {
 			t.Error(err)
 		}
 	})
-	return s, client.New(h.URL), h.URL
+	return s, testutil.Client(h.URL), h.URL
 }
 func submission(branch string) protocol.Submission {
 	return protocol.Submission{Source: protocol.Source{Remote: "git@example.com:team/repo.git", Branch: branch}, Args: []string{"echo", "hello"}, Timeout: time.Minute}
@@ -46,7 +47,7 @@ type adapter struct {
 
 func runner(t *testing.T, base string, info protocol.RunnerInfo) *adapter {
 	t.Helper()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(base, "http")+"/runner", nil)
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(base, "http")+"/runner", testutil.Headers())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,6 +385,7 @@ func TestManagementUsesSocketPeerLoopbackButRunnerRegistrationIsNetworkFacing(t 
 	for _, peer := range []string{"127.0.0.1:1234", "[::1]:1234", "[::ffff:127.0.0.1]:1234"} {
 		req := httptest.NewRequest("GET", "http://coordinator/runners", nil)
 		req.RemoteAddr = peer
+		req.Header = testutil.Headers()
 		req.Header.Set("X-Forwarded-For", "203.0.113.4")
 		rec := httptest.NewRecorder()
 		s.Handler().ServeHTTP(rec, req)
@@ -427,6 +429,7 @@ func TestHTTPRejectsInvalidMethodsBodiesAndPathsWithoutAcceptingJobs(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
+			req.Header = testutil.Headers()
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -487,7 +490,7 @@ func TestRunnerRegistrationRejectsInvalidCapacityAndPriority(t *testing.T) {
 	} {
 		info := capacity("invalid")
 		mutate(&info)
-		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(base, "http")+"/runner", nil)
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(base, "http")+"/runner", testutil.Headers())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -519,13 +522,13 @@ func TestCleanCloseOwnsOnlyItsSpoolAndRestartForgetsHistoryAndRegistrations(t *t
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	open := func() (*coordinator.Server, *client.Client, string) {
 		t.Helper()
-		s, err := coordinator.New(coordinator.Options{OutputDir: root, HeartbeatInterval: time.Hour, Now: func() time.Time { return now }})
+		s, err := coordinator.New(coordinator.Options{OutputDir: root, HeartbeatInterval: time.Hour, Now: func() time.Time { return now }, Build: testutil.PtrBuild()})
 		if err != nil {
 			t.Fatal(err)
 		}
 		h := httptest.NewServer(s.Handler())
 		t.Cleanup(func() { h.Close(); s.Close() })
-		return s, client.New(h.URL), h.URL
+		return s, testutil.Client(h.URL), h.URL
 	}
 	first, c, base := open()
 	old := runner(t, base, capacity("a"))
@@ -777,13 +780,13 @@ func TestDelayedFreshHeartbeatResponseRecoversButReplayDoesNot(t *testing.T) {
 }
 
 func TestBackgroundTickerAppliesCustomHeartbeatCutoff(t *testing.T) {
-	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: 100 * time.Millisecond, MissLimit: 2})
+	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: 100 * time.Millisecond, MissLimit: 2, Build: testutil.PtrBuild()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := httptest.NewServer(s.Handler())
 	t.Cleanup(func() { h.Close(); s.Close() })
-	c := client.New(h.URL)
+	c := testutil.Client(h.URL)
 	a := runner(t, h.URL, capacity("a"))
 	first := a.read("heartbeat")
 	if first.Sequence != 1 {

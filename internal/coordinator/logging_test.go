@@ -15,6 +15,7 @@ import (
 	"github.com/gjtiquia/remote-runners/internal/client"
 	"github.com/gjtiquia/remote-runners/internal/coordinator"
 	"github.com/gjtiquia/remote-runners/internal/protocol"
+	"github.com/gjtiquia/remote-runners/internal/testutil"
 )
 
 func startLogged(t *testing.T) (*coordinator.Server, *client.Client, string, func() string) {
@@ -23,7 +24,7 @@ func startLogged(t *testing.T) (*coordinator.Server, *client.Client, string, fun
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: time.Hour, Logger: log.New(file, "coordinator: ", log.LstdFlags)})
+	s, err := coordinator.New(coordinator.Options{OutputDir: t.TempDir(), HeartbeatInterval: time.Hour, Logger: log.New(file, "coordinator: ", log.LstdFlags), Build: testutil.PtrBuild()})
 	if err != nil {
 		file.Close()
 		t.Fatal(err)
@@ -38,7 +39,7 @@ func startLogged(t *testing.T) (*coordinator.Server, *client.Client, string, fun
 		}
 		return string(data)
 	}
-	return s, client.New(h.URL), h.URL, capture
+	return s, testutil.Client(h.URL), h.URL, capture
 }
 
 func requireLog(t *testing.T, capture func() string, fragments ...string) string {

@@ -17,6 +17,9 @@ const maxControlMessage = 128 * 1024
 const writeTimeout = 10 * time.Second
 
 func (s *Server) serveRunner(w http.ResponseWriter, req *http.Request) {
+	if !s.acceptBuild(w, req, "worker") {
+		return
+	}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	conn, err := upgrader.Upgrade(w, req, nil)
 	if err != nil {

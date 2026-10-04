@@ -48,6 +48,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "management requires a loopback socket peer", 403)
 		return
 	}
+	if !s.acceptBuild(w, r, "client") {
+		return
+	}
 	switch r.URL.Path {
 	case "/runners":
 		if !allow(w, r, "GET") {

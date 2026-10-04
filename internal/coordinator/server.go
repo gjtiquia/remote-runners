@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gjtiquia/remote-runners/internal/buildinfo"
 	"github.com/gjtiquia/remote-runners/internal/protocol"
 	"github.com/gorilla/websocket"
 )
@@ -18,6 +19,9 @@ import (
 // heartbeat values use defaults. Now must be safe for concurrent calls. Logger
 // defaults to timestamped coordinator stderr logs; configure it before New.
 type Options struct {
+	// Build overrides embedded identity for callers hosting a coordinator (e.g. tests).
+	// Nil uses this binary's Go VCS metadata. The value is copied by New.
+	Build             *buildinfo.Info
 	OutputDir         string
 	HeartbeatInterval time.Duration
 	MissLimit         int
@@ -52,6 +56,7 @@ type registration struct {
 type Server struct {
 	mu          sync.Mutex
 	opts        Options
+	build       buildinfo.Info
 	dir         string
 	jobs        map[string]*record
 	order       []string
@@ -71,6 +76,14 @@ type Server struct {
 func New(opts Options) (*Server, error) {
 	if opts.Logger == nil {
 		opts.Logger = log.New(os.Stderr, "coordinator: ", log.LstdFlags)
+	}
+	build := buildinfo.Current()
+	if opts.Build != nil {
+		build = *opts.Build
+	}
+	if err := validBuild("coordinator", build); err != nil {
+		opts.Logger.Printf("version rejected: %v", err)
+		return nil, err
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -93,7 +106,7 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{opts: opts, dir: dir, jobs: make(map[string]*record), runners: make(map[string]*registration), locks: make(map[protocol.Source]string), connections: make(map[*websocket.Conn]bool), stop: make(chan struct{}), lastTick: opts.Now()}
+	s := &Server{opts: opts, build: build, dir: dir, jobs: make(map[string]*record), runners: make(map[string]*registration), locks: make(map[protocol.Source]string), connections: make(map[*websocket.Conn]bool), stop: make(chan struct{}), lastTick: opts.Now()}
 	s.opts.Logger.Printf("coordinator started heartbeat_interval=%s miss_limit=%d", opts.HeartbeatInterval, opts.MissLimit)
 	s.wg.Add(1)
 	go s.heartbeats()

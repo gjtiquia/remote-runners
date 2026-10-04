@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gjtiquia/remote-runners/internal/buildinfo"
 	"github.com/gjtiquia/remote-runners/internal/protocol"
 	"github.com/gjtiquia/remote-runners/internal/repository"
 	"github.com/gjtiquia/remote-runners/internal/workspace"
@@ -99,7 +101,7 @@ func Run(ctx context.Context, cfg Config) error {
 		endpoint.Path = "/runner"
 	}
 	logger.Printf("runner=%q connecting", cfg.Name)
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, endpoint.String(), nil)
+	conn, err := dialCoordinator(ctx, endpoint.String())
 	if err != nil {
 		return err
 	}
@@ -173,6 +175,20 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 }
+
+// Report embedded identity, then surface the coordinator's decision unchanged.
+func dialCoordinator(ctx context.Context, endpoint string) (*websocket.Conn, error) {
+	headers := make(http.Header)
+	buildinfo.SetHeaders(headers, buildinfo.Current())
+	conn, response, err := websocket.DefaultDialer.DialContext(ctx, endpoint, headers)
+	if err != nil && response != nil && response.Body != nil {
+		defer response.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return nil, fmt.Errorf("coordinator %s: %s: %w", response.Status, strings.TrimSpace(string(body)), err)
+	}
+	return conn, err
+}
+
 func (w *worker) disconnect() {
 	w.disconnectOnce.Do(func() {
 		w.progress("disconnected; local jobs continue")
