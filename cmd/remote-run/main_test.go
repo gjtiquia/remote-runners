@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
 func command(t *testing.T, dir string, args ...string) *exec.Cmd {
 	t.Helper()
 	c := exec.Command(cliBinary, args...)
+	c.Env = os.Environ()
 	c.Dir = dir
 	return c
 }
