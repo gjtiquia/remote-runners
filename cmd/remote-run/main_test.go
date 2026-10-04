@@ -124,7 +124,7 @@ func startWorker(t *testing.T, f fixture) fixture {
 		t.Fatalf("build worker: %v\n%s", err, out)
 	}
 	home := filepath.Join(base, "home")
-	cfgdir := filepath.Join(home, ".remote-runner")
+	cfgdir := filepath.Join(home, ".remote-runners")
 	if err = os.MkdirAll(cfgdir, 0700); err != nil {
 		t.Fatal(err)
 	}

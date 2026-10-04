@@ -48,8 +48,14 @@ First run creates a starter and stops:
 remote-runner
 ```
 
-Edit **`~/.remote-runner/config.json`** in a text editor. Set `name` to a unique,
+Edit **`~/.remote-runners/config.json`** in a text editor. Set `name` to a unique,
 stable machine name and `coordinator_url` to `ws://COORDINATOR:2461/runner`.
+On upgrade, an existing `~/.remote-runner/config.json` is moved here automatically
+if the new location does not exist. If both exist, the new location wins and the
+old file is left untouched. Symlinks or cross-filesystem moves require manual
+migration with an actionable message. All worker state now shares
+`~/.remote-runners/`.
+
 Starter defaults:
 
 | Setting | Default |

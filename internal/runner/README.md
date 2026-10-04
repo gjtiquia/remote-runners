@@ -8,7 +8,7 @@ only. It deliberately does **not** stop local jobs.
 
 ## Machine setup
 
-First run creates `~/.remote-runner/config.json` (singular):
+First run creates `~/.remote-runners/config.json`, alongside other runner state:
 
 ```json
 {
@@ -26,7 +26,14 @@ First run creates `~/.remote-runner/config.json` (singular):
 Set `name` to a unique, stable worker name and `coordinator_url` to e.g.
 `ws://coordinator:2461/runner`. HTTP(S) URLs are converted to WS(S); an omitted
 URL path defaults to `/runner`. Memory is in bytes; priority is 0–100. Storage
-uses `.remote-runners` (plural). Defaults use the actual home directory.
+and machine configuration use `.remote-runners`. Defaults use the actual home directory.
+
+The CLI moves a regular legacy `~/.remote-runner/config.json` to the new location
+when it is absent, preserving bytes and never overwriting an existing destination.
+If both files exist, the new location wins and the old file remains untouched.
+Symlinked legacy files or cross-filesystem moves need manual migration; startup
+reports the paths instead of creating an unrelated starter. Explicit
+`LoadConfig(path)` calls still use the caller's chosen path.
 Unspecified optional values retain defaults; explicitly invalid values fail.
 Paths should be absolute. There is no application authentication or sandbox.
 

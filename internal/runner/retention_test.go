@@ -109,7 +109,7 @@ func TestSameSessionRestartRetainsEightWindowsAndReusesExistingWorktree(t *testi
 
 func (f integration) setMaxWindows(t *testing.T, limit int) {
 	t.Helper()
-	path := filepath.Join(filepath.Dir(f.socket), "home", ".remote-runner", "config.json")
+	path := filepath.Join(filepath.Dir(f.socket), "home", ".remote-runners", "config.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

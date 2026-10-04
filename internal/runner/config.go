@@ -23,6 +23,42 @@ type Config struct {
 	Worktrees      string `json:"worktrees"`
 }
 
+func loadDefaultConfig(home string) (Config, error) {
+	path := filepath.Join(home, ".remote-runners", "config.json")
+	if _, err := os.Lstat(path); err == nil {
+		return LoadConfig(path) // An existing destination always wins.
+	} else if !os.IsNotExist(err) {
+		return Config{}, err
+	}
+	legacy := filepath.Join(home, ".remote-runner", "config.json")
+	info, err := os.Lstat(legacy)
+	if os.IsNotExist(err) {
+		return LoadConfig(path)
+	}
+	if err != nil {
+		return Config{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return Config{}, fmt.Errorf("legacy configuration %s is not a regular file; move its contents to %s manually", legacy, path)
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return Config{}, err
+	}
+	// Link then unlink: publish the existing bytes atomically, without replacing
+	// a destination created concurrently. Linux/macOS support this on one FS.
+	if err = os.Link(legacy, path); err != nil {
+		if os.IsExist(err) {
+			return LoadConfig(path)
+		}
+		return Config{}, fmt.Errorf("move configuration from %s to %s manually: %w", legacy, path, err)
+	}
+	if err = os.Remove(legacy); err != nil {
+		return Config{}, fmt.Errorf("configuration preserved at %s, but remove legacy file %s manually: %w", path, legacy, err)
+	}
+	progressLogger("remote-runner").Printf("configuration moved from %q to %q", legacy, path)
+	return LoadConfig(path)
+}
+
 // LoadConfig initializes missing/empty configuration, then requires deliberate setup.
 func LoadConfig(path string) (Config, error) {
 	home, err := os.UserHomeDir()

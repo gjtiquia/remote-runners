@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 )
 
@@ -28,7 +27,7 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: remote-runner")
 		return 1
 	}
-	cfg, err := LoadConfig(filepath.Join(home, ".remote-runner", "config.json"))
+	cfg, err := loadDefaultConfig(home)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

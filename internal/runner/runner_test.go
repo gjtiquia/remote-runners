@@ -147,7 +147,7 @@ func startRunnerWithEnvironment(t *testing.T, maxWindows int, environment []stri
 	httpServer := httptest.NewServer(server.Handler())
 	t.Cleanup(httpServer.Close)
 	home := filepath.Join(dir, "home")
-	cfgdir := filepath.Join(home, ".remote-runner")
+	cfgdir := filepath.Join(home, ".remote-runners")
 	if err = os.MkdirAll(cfgdir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestCompletedOutputIsTransferredWithoutTruncation(t *testing.T) {
 func TestWhitespaceConfigurationCreatesStarter(t *testing.T) {
 	bin := binary(t)
 	home := t.TempDir()
-	dir := filepath.Join(home, ".remote-runner")
+	dir := filepath.Join(home, ".remote-runners")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +473,7 @@ func TestWhitespaceConfigurationCreatesStarter(t *testing.T) {
 func TestConfigurationReportsInvalidCoordinatorBeforeTmux(t *testing.T) {
 	bin := binary(t)
 	home := t.TempDir()
-	dir := filepath.Join(home, ".remote-runner")
+	dir := filepath.Join(home, ".remote-runners")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +491,7 @@ func TestConfigurationReportsInvalidCoordinatorBeforeTmux(t *testing.T) {
 func TestConfiguredRunnerRejectsInvalidTmux(t *testing.T) {
 	bin := binary(t)
 	home := t.TempDir()
-	dir := filepath.Join(home, ".remote-runner")
+	dir := filepath.Join(home, ".remote-runners")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestFirstRunCreatesStarterOutsideTmux(t *testing.T) {
 	if err == nil || !strings.Contains(string(out), "config.json") {
 		t.Fatalf("expected configure instruction: %v %s", err, out)
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".remote-runner", "config.json"))
+	data, err := os.ReadFile(filepath.Join(home, ".remote-runners", "config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

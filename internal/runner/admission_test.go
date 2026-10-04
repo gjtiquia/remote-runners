@@ -42,7 +42,7 @@ func workerProtocol(t *testing.T, minMemory uint64) (integration, func() protoco
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	home := filepath.Join(dir, "home")
-	cfgdir := filepath.Join(home, ".remote-runner")
+	cfgdir := filepath.Join(home, ".remote-runners")
 	if err = os.MkdirAll(cfgdir, 0700); err != nil {
 		t.Fatal(err)
 	}
