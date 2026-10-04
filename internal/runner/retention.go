@@ -35,13 +35,35 @@ func (t terminal) output(args ...string) ([]byte, error) {
 func (t terminal) tagWindow(key protocol.Source, window *jobWindow) error {
 	data, _ := json.Marshal(key)
 	metadata, _ := json.Marshal(windowMetadata{Version: 2, Key: base64.RawURLEncoding.EncodeToString(data), Window: window.id, Pane: window.pane, ShellToken: window.shellToken, Used: window.used.UnixNano()})
-	out, err := t.output("set-option", "-w", "-t", window.pane, "remain-on-exit", "on", ";", "set-option", "-w", "-t", window.pane, windowMetadataOption, string(metadata))
+	out, err := t.output("set-option", "-w", "-t", window.pane, "remain-on-exit", "off", ";", "set-option", "-w", "-t", window.pane, windowMetadataOption, string(metadata))
 	if err != nil {
 		return fmt.Errorf("tag job window: %w: %s", err, out)
 	}
 	out, err = t.output("display-message", "-p", "-t", window.pane, "#{window_id}\t#{pane_id}\t#{"+windowMetadataOption+"}")
 	if err != nil || strings.TrimSpace(string(out)) != window.id+"\t"+window.pane+"\t"+string(metadata) {
 		return fmt.Errorf("could not confirm job window metadata: %v: %s", err, out)
+	}
+	return nil
+}
+
+// Forget UI entries only after a successful session listing proves the window
+// is gone. Active execution accounting is never released by UI disappearance.
+func (t terminal) forgetClosedWindows(windows map[protocol.Source]*jobWindow) error {
+	out, err := t.output("list-windows", "-t", t.session, "-F", "#{window_id}")
+	if err != nil {
+		return fmt.Errorf("inspect job windows: %w: %s", err, out)
+	}
+	present := make(map[string]bool)
+	for _, id := range strings.Fields(string(out)) {
+		present[id] = true
+	}
+	if !present[t.window] {
+		return fmt.Errorf("cannot confirm runner window in dedicated session; inspect manually")
+	}
+	for key, window := range windows {
+		if !window.active && !present[window.id] {
+			delete(windows, key)
+		}
 	}
 	return nil
 }
@@ -121,6 +143,10 @@ func (t terminal) retainedWindows() (map[protocol.Source]*jobWindow, error) {
 		}
 		if windows[key] != nil {
 			return nil, fmt.Errorf("duplicate retained worktree windows; inspect manually before restarting")
+		}
+		// Upgrade retained interactive shells too, without replacing them.
+		if err = t.tagWindow(key, window); err != nil {
+			return nil, err
 		}
 		windows[key] = window
 	}

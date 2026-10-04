@@ -49,6 +49,58 @@ func (f integration) waitForShellPrompt(t *testing.T, window, prompt string) {
 	}
 }
 
+func TestExitClosesCompletedJobWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		restart, differentWorktree bool
+	}{
+		{"new/same-worktree", false, false},
+		{"new/different-worktree", false, true},
+		{"retained/same-worktree", true, false},
+		{"retained/different-worktree", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := startRunnerWithWindows(t, 1)
+			job := f.submit(t, "/bin/echo", "FIRST")
+			if result, output := f.wait(t, job.ID); result.State != "succeeded" {
+				t.Fatalf("initial job: %+v %s", result, output)
+			}
+			window := f.window(t, job.ID)
+			if tc.restart {
+				// Simulate a retained interactive window from the previous version.
+				f.tmux(t, "set-option", "-w", "-t", window, "remain-on-exit", "on")
+				f.stopRunner(t)
+				time.Sleep(400 * time.Millisecond)
+				f.restartRunner(t)
+			}
+			f.tmux(t, "send-keys", "-l", "-t", window, "exit")
+			f.tmux(t, "send-keys", "-t", window, "Enter")
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				windows := strings.Fields(f.tmux(t, "list-windows", "-t", f.session, "-F", "#{window_id}"))
+				if len(windows) == 1 && windows[0] != window {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("exit retained the job window: %v", windows)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if tc.differentWorktree {
+				f.source = repository(t, "")
+			}
+			next := f.submit(t, "/bin/echo", "AFTER_EXIT")
+			result, output := f.wait(t, next.ID)
+			if result.State != "succeeded" || !strings.Contains(output, "AFTER_EXIT") {
+				t.Fatalf("next job did not recreate its shell/reclaim the closed window's budget: %+v %s", result, output)
+			}
+			if nextWindow := f.window(t, next.ID); nextWindow == window {
+				t.Fatalf("next job reused the closed window %s", window)
+			}
+		})
+	}
+}
+
 func TestManualCommandsMakeWindowFailEarlyWithoutQueuedKeystrokes(t *testing.T) {
 	for _, manual := range []string{"sleep 60", "while :; do :; done"} {
 		t.Run(manual, func(t *testing.T) {

@@ -104,6 +104,12 @@ requires the owned prompt nonce, shell PID matching `pane_pid`, no active helper
 and the original single live pane outside copy mode. Admission and eviction
 recheck these guards inside tmux's command queue. Eviction targets only the exact
 idle pane with `kill-pane`, never the whole window with `kill-window`.
+Job windows set `remain-on-exit off`, including retained live shells on restart.
+Typing `exit` closes the job pane normally (the window closes when no panes remain).
+Before admission, a successful session listing drops closed inactive UI entries
+so the next job can create a new shell and reclaim its window budget. Missing
+windows never release active execution accounting; existing panes still require
+all identity and idle checks.
 
 Startup accepts tagged **live idle shells**, but rejects running old helpers,
 manual applications, untagged windows, malformed identities, replaced/dead shells,

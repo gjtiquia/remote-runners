@@ -238,6 +238,11 @@ func (w *worker) start(job protocol.Job) error {
 		return err
 	}
 	key := protocol.Source{Remote: identity, Branch: job.Source.Branch}
+	if len(w.windows) > 0 {
+		if err := w.terminal.forgetClosedWindows(w.windows); err != nil {
+			return err
+		}
+	}
 	window := w.windows[key]
 	if window != nil && window.active {
 		return fmt.Errorf("worktree already active")

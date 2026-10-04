@@ -82,6 +82,8 @@ preparation/execution the shell changes to the prepared worktree root and receiv
 the command status. Later jobs reuse that same window and shell, without respawn.
 At the retention limit the least-recently-used verified idle job pane is evicted,
 never an active/worker pane or an entire window. Worktrees stay on disk.
+Typing `exit` at the job shell prompt closes its pane/window normally; the next
+job creates a fresh shell if that worktree's window was closed.
 
 **Environment:** launch the worker with your desired baseline exports and `PATH`.
 Those keys explicitly override tmux's environment when creating the shell; normal
